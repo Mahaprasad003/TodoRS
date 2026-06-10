@@ -97,6 +97,56 @@ pub enum RecurrenceKind {
     Yearly,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    #[test]
+    fn test_task_creation() {
+        let user_id = Uuid::new_v4();
+        let task = Task::new(user_id, "Test task".to_string());
+
+        assert_eq!(task.title, "Test task");
+        assert_eq!(task.user_id, user_id);
+        assert_eq!(task.status, TaskStatus::Pending);
+        assert!(task.completed_at.is_none());
+        assert!(task.deleted_at.is_none());
+    }
+
+    #[test]
+    fn test_task_completion() {
+        let user_id = Uuid::new_v4();
+        let mut task = Task::new(user_id, "Test task".to_string());
+
+        task.complete();
+
+        assert_eq!(task.status, TaskStatus::Completed);
+        assert!(task.completed_at.is_some());
+    }
+
+    #[test]
+    fn test_task_overdue() {
+        let user_id = Uuid::new_v4();
+        let mut task = Task::new(user_id, "Test task".to_string());
+
+        // Not overdue without due date
+        assert!(!task.is_overdue());
+
+        // Not overdue with future due date
+        task.due_at = Some(Utc::now() + Duration::hours(1));
+        assert!(!task.is_overdue());
+
+        // Overdue with past due date
+        task.due_at = Some(Utc::now() - Duration::hours(1));
+        assert!(task.is_overdue());
+
+        // Not overdue if completed
+        task.complete();
+        assert!(!task.is_overdue());
+    }
+}
+
 impl Task {
     pub fn new(user_id: Uuid, title: String) -> Self {
         let now = Utc::now();

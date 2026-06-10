@@ -1,6 +1,9 @@
+-- Enable foreign key enforcement for this connection
+PRAGMA foreign_keys = ON;
+
 -- Create users table (for future multi-user support)
 CREATE TABLE users (
-    id TEXT PRIMARY KEY NOT NULL,
+    id BLOB PRIMARY KEY NOT NULL,
     email TEXT UNIQUE NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -8,8 +11,8 @@ CREATE TABLE users (
 
 -- Create projects table
 CREATE TABLE projects (
-    id TEXT PRIMARY KEY NOT NULL,
-    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    id BLOB PRIMARY KEY NOT NULL,
+    user_id BLOB NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     color TEXT,
     sort_order INTEGER NOT NULL DEFAULT 0,
@@ -20,18 +23,43 @@ CREATE TABLE projects (
 
 -- Create tags table
 CREATE TABLE tags (
-    id TEXT PRIMARY KEY NOT NULL,
-    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    id BLOB PRIMARY KEY NOT NULL,
+    user_id BLOB NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     color TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Create recurrence_rules table
+-- Create task_tags junction table (normalized many-to-many)
+CREATE TABLE task_tags (
+    task_id BLOB NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    tag_id BLOB NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (task_id, tag_id)
+);
+
+-- Create tasks table (must exist before recurrence_rules references it)
+CREATE TABLE tasks (
+    id BLOB PRIMARY KEY NOT NULL,
+    user_id BLOB NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    project_id BLOB REFERENCES projects(id) ON DELETE SET NULL,
+    priority TEXT NOT NULL DEFAULT 'none',
+    due_at TEXT,
+    scheduled_at TEXT,
+    recurrence_rule_id BLOB,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT,
+    deleted_at TEXT
+);
+
+-- Create recurrence_rules table (references tasks; app enforces the reverse link)
 CREATE TABLE recurrence_rules (
-    id TEXT PRIMARY KEY NOT NULL,
-    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    id BLOB PRIMARY KEY NOT NULL,
+    task_id BLOB NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     kind TEXT NOT NULL,
     interval INTEGER NOT NULL DEFAULT 1,
     by_weekday TEXT,
@@ -41,29 +69,10 @@ CREATE TABLE recurrence_rules (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Create tasks table
-CREATE TABLE tasks (
-    id TEXT PRIMARY KEY NOT NULL,
-    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    title TEXT NOT NULL,
-    description TEXT,
-    status TEXT NOT NULL DEFAULT 'pending',
-    project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
-    tag_ids TEXT NOT NULL DEFAULT '[]',
-    priority TEXT NOT NULL DEFAULT 'none',
-    due_at TEXT,
-    scheduled_at TEXT,
-    recurrence_rule_id TEXT REFERENCES recurrence_rules(id) ON DELETE SET NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    completed_at TEXT,
-    deleted_at TEXT
-);
-
 -- Create reminders table
 CREATE TABLE reminders (
-    id TEXT PRIMARY KEY NOT NULL,
-    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    id BLOB PRIMARY KEY NOT NULL,
+    task_id BLOB NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     remind_at TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),

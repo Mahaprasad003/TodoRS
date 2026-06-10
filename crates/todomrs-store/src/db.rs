@@ -12,6 +12,14 @@ impl Database {
             .connect(database_url)
             .await?;
 
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await?;
+
+        sqlx::query("PRAGMA journal_mode = WAL")
+            .execute(&pool)
+            .await?;
+
         Ok(Self { pool })
     }
 

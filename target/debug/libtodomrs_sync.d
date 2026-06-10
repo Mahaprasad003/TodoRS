@@ -1,1 +1,0 @@
-/home/mp/Projects/TodoRS/target/debug/libtodomrs_sync.rlib: /home/mp/Projects/TodoRS/crates/todomrs-core/src/domain.rs /home/mp/Projects/TodoRS/crates/todomrs-core/src/lib.rs /home/mp/Projects/TodoRS/crates/todomrs-sync/src/lib.rs /home/mp/Projects/TodoRS/crates/todomrs-sync/src/operations.rs

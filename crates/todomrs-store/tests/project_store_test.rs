@@ -112,7 +112,7 @@ async fn test_delete_project() -> Result<()> {
     let project = make_project(user_id, "To delete");
     store.create(&project).await?;
 
-    store.delete(project.id).await?;
+    store.hard_delete(project.id).await?;
 
     let retrieved = store.get_by_id(project.id).await?;
     assert!(retrieved.is_none());

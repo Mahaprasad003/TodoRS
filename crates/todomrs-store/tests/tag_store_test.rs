@@ -107,7 +107,7 @@ async fn test_delete_tag() -> Result<()> {
     let tag = make_tag(user_id, "to-delete");
     store.create(&tag).await?;
 
-    store.delete(tag.id).await?;
+    store.hard_delete(tag.id).await?;
 
     let retrieved = store.get_by_id(tag.id).await?;
     assert!(retrieved.is_none());

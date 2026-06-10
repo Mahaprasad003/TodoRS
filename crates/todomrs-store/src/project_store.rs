@@ -79,8 +79,21 @@ impl ProjectStore {
         Ok(())
     }
 
-    pub async fn delete(&self, id: Uuid) -> Result<()> {
+    /// Permanently remove a project (hard delete).
+    pub async fn hard_delete(&self, id: Uuid) -> Result<()> {
         sqlx::query("DELETE FROM projects WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Soft-delete a project by setting `archived_at`.
+    pub async fn soft_delete(&self, id: Uuid) -> Result<()> {
+        let now = Utc::now();
+        sqlx::query("UPDATE projects SET archived_at = ?, updated_at = ? WHERE id = ?")
+            .bind(now)
+            .bind(now)
             .bind(id)
             .execute(&self.pool)
             .await?;

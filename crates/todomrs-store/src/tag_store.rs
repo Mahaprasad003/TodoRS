@@ -71,7 +71,8 @@ impl TagStore {
         Ok(())
     }
 
-    pub async fn delete(&self, id: Uuid) -> Result<()> {
+    /// Permanently remove a tag (hard delete). Cascades to `task_tags`.
+    pub async fn hard_delete(&self, id: Uuid) -> Result<()> {
         sqlx::query("DELETE FROM tags WHERE id = ?")
             .bind(id)
             .execute(&self.pool)

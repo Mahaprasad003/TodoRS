@@ -119,7 +119,7 @@ async fn test_delete_task() -> Result<()> {
     let task = Task::new(user_id, "To delete".to_string());
     store.create(&task).await?;
 
-    store.delete(task.id).await?;
+    store.hard_delete(task.id).await?;
 
     let retrieved = store.get_by_id(task.id).await?;
     assert!(retrieved.is_none());

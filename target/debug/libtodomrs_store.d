@@ -1,0 +1,1 @@
+/home/mp/Projects/TodoRS/target/debug/libtodomrs_store.rlib: /home/mp/Projects/TodoRS/crates/todomrs-core/src/domain.rs /home/mp/Projects/TodoRS/crates/todomrs-core/src/lib.rs /home/mp/Projects/TodoRS/crates/todomrs-store/src/db.rs /home/mp/Projects/TodoRS/crates/todomrs-store/src/lib.rs

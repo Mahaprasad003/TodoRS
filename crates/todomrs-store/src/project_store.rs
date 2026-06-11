@@ -89,6 +89,18 @@ impl ProjectStore {
     }
 
     /// Soft-delete a project by setting `archived_at`.
+    /// Find a project by name for a given user (returns None if archived or not found).
+    pub async fn find_by_name(&self, user_id: Uuid, name: &str) -> Result<Option<Project>> {
+        let row: Option<ProjectRow> = sqlx::query_as(
+            "SELECT * FROM projects WHERE user_id = ? AND name = ? AND archived_at IS NULL",
+        )
+        .bind(user_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(ProjectRow::into_project))
+    }
+
     pub async fn soft_delete(&self, id: Uuid) -> Result<()> {
         let now = Utc::now();
         sqlx::query("UPDATE projects SET archived_at = ?, updated_at = ? WHERE id = ?")

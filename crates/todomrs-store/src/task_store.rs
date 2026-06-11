@@ -47,7 +47,7 @@ impl TaskStore {
         .await?;
 
         // Insert task_tags junction rows in the same transaction
-        set_task_tags(&mut *tx, task.id, &task.tag_ids).await?;
+        set_task_tags(&mut tx, task.id, &task.tag_ids).await?;
 
         tx.commit().await.context("commit transaction")?;
         Ok(())
@@ -123,7 +123,7 @@ impl TaskStore {
         .await?;
 
         // Replace task_tags in the same transaction
-        set_task_tags(&mut *tx, task.id, &task.tag_ids).await?;
+        set_task_tags(&mut tx, task.id, &task.tag_ids).await?;
 
         tx.commit().await.context("commit transaction")?;
         Ok(())

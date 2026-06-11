@@ -315,3 +315,19 @@ impl Task {
         }
     }
 }
+
+impl Project {
+    pub fn new(user_id: Uuid, name: String) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4(),
+            user_id,
+            name,
+            color: None,
+            sort_order: 0,
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+        }
+    }
+}

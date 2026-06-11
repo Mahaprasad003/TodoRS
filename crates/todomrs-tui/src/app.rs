@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
 use anyhow::Result;
 use chrono::{Datelike, NaiveTime, Timelike, Weekday};
@@ -64,6 +65,7 @@ pub struct App {
     pub sync_client: Option<SyncClient>,
     pub sync_status: SyncStatus,
     pub last_synced_at: chrono::DateTime<chrono::Utc>,
+    pub last_sync_attempt: Instant,
 }
 
 impl std::fmt::Debug for App {
@@ -120,6 +122,7 @@ impl App {
             sync_client: None,
             sync_status: SyncStatus::Disabled,
             last_synced_at: chrono::DateTime::from_timestamp(0, 0).unwrap_or(chrono::Utc::now()),
+            last_sync_attempt: Instant::now(),
         }
     }
 
@@ -366,7 +369,7 @@ impl App {
                                 self.op_store.append(&op).await?;
 
                                 self.status_message = Some(format!("Created project: {}", name));
-                                self.refresh_project_counts().await?;
+                                self.sync().await?;
                             }
                         } else {
                             self.create_task_from_input().await?;
@@ -720,7 +723,7 @@ impl App {
         };
 
         self.status_message = Some(format!("Updated {}", changed_parts));
-        self.refresh_tasks().await?;
+        self.sync().await?;
         Ok(())
     }
 
@@ -787,7 +790,7 @@ impl App {
         self.op_store.append(&op).await?;
 
         self.status_message = Some(format!("Created: {}", task.title));
-        self.refresh_tasks().await?;
+        self.sync().await?;
         Ok(())
     }
 
@@ -849,7 +852,7 @@ impl App {
         }
 
         self.status_message = Some(format!("{}: {}", description, task.title));
-        self.refresh_tasks().await?;
+        self.sync().await?;
         Ok(())
     }
 
@@ -887,7 +890,7 @@ impl App {
         }
 
         self.status_message = Some(format!("Deleted: {}", title));
-        self.refresh_tasks().await?;
+        self.sync().await?;
         Ok(())
     }
 
@@ -927,7 +930,7 @@ impl App {
 
         self.status_message = Some(format!("Cleared {} completed tasks", count));
         self.selected_index = 0;
-        self.refresh_tasks().await?;
+        self.sync().await?;
         Ok(())
     }
 
@@ -964,8 +967,20 @@ impl App {
             format_recurrence_rule(rule)
         ));
 
-        self.refresh_tasks().await?;
+        self.sync().await?;
         Ok(())
+    }
+
+    /// Check if 30s has elapsed since last sync attempt and auto-sync if so.
+    /// Returns true if a sync was triggered.
+    pub async fn maybe_auto_sync(&mut self) -> bool {
+        if self.last_sync_attempt.elapsed() >= std::time::Duration::from_secs(30) {
+            if self.sync_client.is_some() {
+                self.sync().await.ok();
+                return true;
+            }
+        }
+        false
     }
 
     /// Perform a full sync cycle: upload local ops, download remote ops, apply them.
@@ -979,6 +994,7 @@ impl App {
         };
 
         self.sync_status = SyncStatus::Syncing;
+        self.last_sync_attempt = Instant::now();
 
         // 1. Upload local unsynced operations
         let upload_count = match self.op_store.get_unsynced(self.user_id).await {
@@ -1409,7 +1425,7 @@ impl App {
         }
 
         self.status_message = Some(format!("Deleted project: {}", name));
-        self.refresh_tasks().await?;
+        self.sync().await?;
         Ok(())
     }
 }

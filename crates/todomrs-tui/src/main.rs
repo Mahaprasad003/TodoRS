@@ -134,6 +134,9 @@ async fn run_async(
     loop {
         terminal.draw(|f| ui::draw(f, &app))?;
 
+        // Periodic auto-sync every 30s
+        app.maybe_auto_sync().await;
+
         if event::poll(std::time::Duration::from_millis(100))? {
             let event = event::read()?;
             app.handle_event(event).await?;
@@ -142,6 +145,11 @@ async fn run_async(
         if app.should_quit {
             break;
         }
+    }
+
+    // Exit sync: upload any remaining unsynced operations before quitting
+    if app.sync_client.is_some() {
+        app.sync().await.ok();
     }
 
     db.close().await;

@@ -66,6 +66,8 @@ pub struct App {
     pub sync_status: SyncStatus,
     pub last_synced_at: chrono::DateTime<chrono::Utc>,
     pub last_sync_attempt: Instant,
+    /// Timestamp of the most recent mutation (for debounce).
+    pub last_mutation_at: Instant,
     /// Set after a mutation to trigger a debounced auto-sync (~10s later).
     pub sync_debounce_requested: bool,
 }
@@ -125,6 +127,7 @@ impl App {
             sync_status: SyncStatus::Disabled,
             last_synced_at: chrono::DateTime::from_timestamp(0, 0).unwrap_or(chrono::Utc::now()),
             last_sync_attempt: Instant::now(),
+            last_mutation_at: Instant::now(),
             sync_debounce_requested: false,
         }
     }
@@ -985,8 +988,9 @@ impl App {
     /// Returns true if a sync was triggered.
     pub async fn maybe_auto_sync(&mut self) -> bool {
         let should_periodic = self.last_sync_attempt.elapsed() >= std::time::Duration::from_secs(30);
+        // Debounce: 10s since the LAST MUTATION, not since last sync.
         let should_debounce = self.sync_debounce_requested
-            && self.last_sync_attempt.elapsed() >= std::time::Duration::from_secs(10);
+            && self.last_mutation_at.elapsed() >= std::time::Duration::from_secs(10);
 
         if (should_periodic || should_debounce) && self.sync_client.is_some() {
             self.sync_debounce_requested = false;
@@ -996,8 +1000,9 @@ impl App {
         false
     }
 
-    /// Mark that a mutation has occurred — the next debounce check will trigger sync.
+    /// Mark that a mutation has occurred — sync will fire 10s after the last one.
     pub fn request_sync_after_mutation(&mut self) {
+        self.last_mutation_at = Instant::now();
         self.sync_debounce_requested = true;
     }
 

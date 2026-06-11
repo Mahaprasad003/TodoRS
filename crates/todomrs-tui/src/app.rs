@@ -981,8 +981,9 @@ impl App {
         self.sync_status = SyncStatus::Syncing;
 
         // 1. Upload local unsynced operations
-        match self.op_store.get_unsynced(self.user_id).await {
+        let upload_count = match self.op_store.get_unsynced(self.user_id).await {
             Ok(unsynced) if !unsynced.is_empty() => {
+                let count = unsynced.len();
                 if let Err(e) = client.upload_operations(unsynced.clone()).await {
                     self.sync_status = SyncStatus::Offline(format!("Upload failed: {}", e));
                     self.status_message = Some(format!("Sync upload failed: {}", e));
@@ -990,14 +991,15 @@ impl App {
                 }
                 let op_ids: Vec<Uuid> = unsynced.iter().map(|op| op.op_id).collect();
                 self.op_store.mark_synced(&op_ids).await?;
+                count
             }
-            Ok(_) => {} // Nothing to upload
+            Ok(_) => 0,
             Err(e) => {
                 self.sync_status = SyncStatus::Offline(format!("DB error: {}", e));
                 self.status_message = Some(format!("Sync DB error: {}", e));
                 return Ok(());
             }
-        }
+        };
 
         // 2. Download remote operations created after last_synced_at
         let remote_ops = match client.get_operations(self.last_synced_at).await {
@@ -1030,12 +1032,19 @@ impl App {
         // 4. Refresh UI
         self.refresh_tasks().await?;
 
-        if applied_count > 0 {
-            self.sync_status = SyncStatus::Synced;
-            self.status_message = Some(format!("Synced ({} remote ops)", applied_count));
+        self.sync_status = SyncStatus::Synced;
+
+        // Build a status message showing what sync did
+        let status_msg = if upload_count > 0 && applied_count > 0 {
+            format!("Synced (↑{} uploaded, ↓{} applied)", upload_count, applied_count)
+        } else if upload_count > 0 {
+            format!("Synced ({} uploaded)", upload_count)
+        } else if applied_count > 0 {
+            format!("Synced ({} remote ops)", applied_count)
         } else {
-            self.sync_status = SyncStatus::Synced;
-        }
+            "Synced".to_string()
+        };
+        self.status_message = Some(status_msg);
 
         Ok(())
     }

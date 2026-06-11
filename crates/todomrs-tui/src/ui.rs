@@ -432,13 +432,16 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             Span::raw("")
         },
         Span::raw("│ "),
-        // Sync indicator
+        // Sync indicator — show descriptive status text
         {
-            let (sync_text, sync_color) = match &app.sync_status {
-                SyncStatus::Disabled => (" ○", Color::DarkGray),
-                SyncStatus::Syncing => (" ↻", Color::Yellow),
-                SyncStatus::Synced => (" ✓", Color::Green),
-                SyncStatus::Offline(_) => (" ✗", Color::Red),
+            let (sync_text, sync_color): (String, Color) = match &app.sync_status {
+                SyncStatus::Disabled => ("syncoff".into(), Color::DarkGray),
+                SyncStatus::Syncing => ("sync…".into(), Color::Yellow),
+                SyncStatus::Synced => ("synced".into(), Color::Green),
+                SyncStatus::Offline(msg) => {
+                    let short = if msg.len() > 20 { format!("{}…", &msg[..20]) } else { msg.clone() };
+                    (format!("err!{}", short), Color::Red)
+                }
             };
             Span::styled(sync_text, Style::default().fg(sync_color))
         },

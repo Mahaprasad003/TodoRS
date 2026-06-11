@@ -269,7 +269,7 @@ impl App {
                         KeyCode::Char('c') | KeyCode::Char('C') => {
                             self.clear_completed().await?
                         }
-                        KeyCode::Char('S') if key.modifiers.is_empty() => {
+                        KeyCode::Char('s') | KeyCode::Char('S') => {
                             self.sync().await?;
                         }
                         KeyCode::Char('1') => {

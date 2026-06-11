@@ -66,6 +66,8 @@ pub struct App {
     pub sync_status: SyncStatus,
     pub last_synced_at: chrono::DateTime<chrono::Utc>,
     pub last_sync_attempt: Instant,
+    /// Set after a mutation to trigger a debounced auto-sync (~10s later).
+    pub sync_debounce_requested: bool,
 }
 
 impl std::fmt::Debug for App {
@@ -123,6 +125,7 @@ impl App {
             sync_status: SyncStatus::Disabled,
             last_synced_at: chrono::DateTime::from_timestamp(0, 0).unwrap_or(chrono::Utc::now()),
             last_sync_attempt: Instant::now(),
+            sync_debounce_requested: false,
         }
     }
 
@@ -369,7 +372,7 @@ impl App {
                                 self.op_store.append(&op).await?;
 
                                 self.status_message = Some(format!("Created project: {}", name));
-                                self.sync().await?;
+                                self.request_sync_after_mutation();
                             }
                         } else {
                             self.create_task_from_input().await?;
@@ -723,7 +726,7 @@ impl App {
         };
 
         self.status_message = Some(format!("Updated {}", changed_parts));
-        self.sync().await?;
+        self.request_sync_after_mutation();
         Ok(())
     }
 
@@ -790,7 +793,7 @@ impl App {
         self.op_store.append(&op).await?;
 
         self.status_message = Some(format!("Created: {}", task.title));
-        self.sync().await?;
+        self.request_sync_after_mutation();
         Ok(())
     }
 
@@ -852,7 +855,7 @@ impl App {
         }
 
         self.status_message = Some(format!("{}: {}", description, task.title));
-        self.sync().await?;
+        self.request_sync_after_mutation();
         Ok(())
     }
 
@@ -890,7 +893,7 @@ impl App {
         }
 
         self.status_message = Some(format!("Deleted: {}", title));
-        self.sync().await?;
+        self.request_sync_after_mutation();
         Ok(())
     }
 
@@ -930,7 +933,7 @@ impl App {
 
         self.status_message = Some(format!("Cleared {} completed tasks", count));
         self.selected_index = 0;
-        self.sync().await?;
+        self.request_sync_after_mutation();
         Ok(())
     }
 
@@ -967,20 +970,28 @@ impl App {
             format_recurrence_rule(rule)
         ));
 
-        self.sync().await?;
+        self.request_sync_after_mutation();
         Ok(())
     }
 
-    /// Check if 30s has elapsed since last sync attempt and auto-sync if so.
+    /// Check for debounced or periodic auto-sync.
     /// Returns true if a sync was triggered.
     pub async fn maybe_auto_sync(&mut self) -> bool {
-        if self.last_sync_attempt.elapsed() >= std::time::Duration::from_secs(30) {
-            if self.sync_client.is_some() {
-                self.sync().await.ok();
-                return true;
-            }
+        let should_periodic = self.last_sync_attempt.elapsed() >= std::time::Duration::from_secs(30);
+        let should_debounce = self.sync_debounce_requested
+            && self.last_sync_attempt.elapsed() >= std::time::Duration::from_secs(10);
+
+        if (should_periodic || should_debounce) && self.sync_client.is_some() {
+            self.sync_debounce_requested = false;
+            self.sync().await.ok();
+            return true;
         }
         false
+    }
+
+    /// Mark that a mutation has occurred — the next debounce check will trigger sync.
+    pub fn request_sync_after_mutation(&mut self) {
+        self.sync_debounce_requested = true;
     }
 
     /// Perform a full sync cycle: upload local ops, download remote ops, apply them.
@@ -1425,7 +1436,7 @@ impl App {
         }
 
         self.status_message = Some(format!("Deleted project: {}", name));
-        self.sync().await?;
+        self.request_sync_after_mutation();
         Ok(())
     }
 }

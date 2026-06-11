@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use reqwest::Client;
 
 /// A client for syncing operations with the Supabase backend.
@@ -19,11 +20,19 @@ impl SyncClient {
     /// * `api_key` — The Supabase anon/public key.
     pub fn new(base_url: String, api_key: String) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .expect("reqwest Client::builder() never fails"),
             base_url,
             api_key,
             access_token: None,
         }
+    }
+
+    /// Returns `true` if the client has a valid access token.
+    pub fn is_authenticated(&self) -> bool {
+        self.access_token.is_some()
     }
 
     /// Authenticate with email and password.
@@ -77,23 +86,29 @@ impl SyncClient {
         Ok(())
     }
 
-    /// Download operations with sequence greater than `since_seq`.
+    /// Download operations created after `since_time`.
+    ///
+    /// Uses `created_at` (global timestamp) for filtering instead of
+    /// per-device sequence numbers, making it safe across multiple devices.
     ///
     /// Requires a valid access token (call `login` first).
     pub async fn get_operations(
         &self,
-        since_seq: i64,
+        since_time: DateTime<Utc>,
     ) -> Result<Vec<super::operations::Operation>> {
         let token = self
             .access_token
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Not authenticated"))?;
 
+        let since_str = since_time.to_rfc3339();
+
         let response = self
             .client
             .get(format!(
                 "{}/functions/v1/get-operations?since={}",
-                self.base_url, since_seq
+                self.base_url,
+                urlencoding(&since_str)
             ))
             .header("apikey", &self.api_key)
             .header("Authorization", format!("Bearer {}", token))
@@ -115,4 +130,9 @@ impl SyncClient {
 
         Ok(ops)
     }
+}
+
+/// Minimal URL-encoding for the timestamp parameter.
+fn urlencoding(s: &str) -> String {
+    s.replace(':', "%3A")
 }

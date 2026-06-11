@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, InputMode, View};
+use crate::app::{App, InputMode, SyncStatus, View};
 
 /// TokyoNight-compatible highlight color (blue-gray selection)
 const HIGHLIGHT_BG: Color = Color::Rgb(55, 68, 100);
@@ -432,6 +432,19 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             Span::raw("")
         },
         Span::raw("│ "),
+        // Sync indicator
+        {
+            let (sync_text, sync_color) = match &app.sync_status {
+                SyncStatus::Disabled => (" ○", Color::DarkGray),
+                SyncStatus::Syncing => (" ↻", Color::Yellow),
+                SyncStatus::Synced => (" ✓", Color::Green),
+                SyncStatus::Offline(_) => (" ✗", Color::Red),
+            };
+            Span::styled(sync_text, Style::default().fg(sync_color))
+        },
+        Span::raw(" │ "),
+        Span::styled("S", Style::default().fg(Color::Yellow)),
+        Span::raw(" Sync "),
         Span::styled("q", Style::default().fg(Color::Yellow)),
         Span::raw(" Quit "),
         Span::styled("?", Style::default().fg(Color::Yellow)),
@@ -497,6 +510,10 @@ fn draw_help(f: &mut Frame) {
         Line::from("  Enter  — Select/deselect a project to filter by"),
         Line::from("  a      — Create project (in Projects view)"),
         Line::from("  d      — Delete project (in Projects view)"),
+        Line::from(""),
+        Line::from("Sync:"),
+        Line::from("  S      — Sync now"),
+        Line::from("  ✓ synced  ↻ syncing  ✗ offline  ○ disabled"),
         Line::from(""),
         Line::from("Search & Help:"),
         Line::from("  /      — Search"),

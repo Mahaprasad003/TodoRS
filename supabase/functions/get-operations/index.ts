@@ -28,14 +28,14 @@ Deno.serve(async (req) => {
     }
 
     const url = new URL(req.url)
-    const sinceSeq = url.searchParams.get('since') || '0'
+    const sinceTime = url.searchParams.get('since') || '1970-01-01T00:00:00Z'
 
     const { data, error } = await supabase
       .from('operations')
       .select('*')
       .eq('user_id', user.id)
-      .gt('seq', parseInt(sinceSeq))
-      .order('seq', { ascending: true })
+      .gt('created_at', sinceTime)
+      .order('created_at', { ascending: true })
 
     if (error) throw error
 

@@ -1,8 +1,10 @@
 mod app;
+mod config;
 mod ui;
 
 use anyhow::Result;
 use app::App;
+use config::Config;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture},
     execute,
@@ -25,6 +27,37 @@ fn load_or_create_id(path: &str) -> Uuid {
         })
 }
 
+/// Initialize the sync client from config (called before raw mode so errors are visible).
+async fn init_sync_client(config: &Config) -> Option<todomrs_sync::SyncClient> {
+    if !config.is_configured() {
+        eprintln!(
+            "Sync not configured. Edit: {}",
+            Config::config_path().display()
+        );
+        return None;
+    }
+
+    let mut client = todomrs_sync::SyncClient::new(
+        config.supabase_url.clone(),
+        config.supabase_api_key.clone(),
+    );
+
+    match client.login(&config.email, &config.password).await {
+        Ok(token) if !token.is_empty() => {
+            eprintln!("Sync login successful");
+            Some(client)
+        }
+        Ok(_) => {
+            eprintln!("Sync login returned empty token");
+            None
+        }
+        Err(e) => {
+            eprintln!("Sync login failed: {}", e);
+            None
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Install panic hook to restore terminal on crash
@@ -34,6 +67,10 @@ async fn main() -> Result<()> {
         original_hook(panic);
     }));
 
+    // Load config and init sync client BEFORE raw mode (so errors are visible)
+    let config = Config::load()?;
+    let sync_client = init_sync_client(&config).await;
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -42,7 +79,7 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Run the async TUI loop
-    let result = run_async(&mut terminal).await;
+    let result = run_async(&mut terminal, sync_client).await;
 
     // Always restore terminal
     let _ = terminal.show_cursor();
@@ -50,7 +87,10 @@ async fn main() -> Result<()> {
     result
 }
 
-async fn run_async(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+async fn run_async(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    sync_client: Option<todomrs_sync::SyncClient>,
+) -> Result<()> {
     let db = Database::new("sqlite://./todomrs.db?mode=rwc").await?;
     sqlx::migrate!("../../migrations").run(db.pool()).await?;
 
@@ -70,8 +110,26 @@ async fn run_async(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Res
         .execute(db.pool())
         .await?;
 
-    let mut app = App::new(user_id, device_id, task_store, op_store, project_store, recurrence_store);
+    let mut app = App::new(
+        user_id,
+        device_id,
+        task_store,
+        op_store,
+        project_store,
+        recurrence_store,
+    );
+
+    // Inject sync client if available
+    if let Some(client) = sync_client {
+        app.set_sync_client(client);
+    }
+
     app.refresh_tasks().await?;
+
+    // Initial sync
+    if app.sync_client.is_some() {
+        app.sync().await?;
+    }
 
     loop {
         terminal.draw(|f| ui::draw(f, &app))?;

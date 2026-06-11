@@ -7,7 +7,8 @@ use todomrs_core::domain::{AnchorMode, Priority, Project, RecurrenceRule, Task, 
 use todomrs_core::RecurrenceEngine;
 use todomrs_core::NaturalLanguageParser;
 use todomrs_store::{OperationStore, ProjectStore, RecurrenceRuleStore, TaskStore};
-use todomrs_sync::operations::Operation;
+use todomrs_sync::operations::{Entity, Operation, OperationPayload, OperationType};
+use todomrs_sync::SyncClient;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -18,6 +19,14 @@ pub enum View {
     Projects,
     Completed,
     Recurring,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SyncStatus {
+    Disabled,
+    Syncing,
+    Synced,
+    Offline(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -52,6 +61,9 @@ pub struct App {
     pub project_counts: Vec<(Uuid, String, usize, usize)>,
     pub selected_project_id: Option<Uuid>,
     pub project_selected_index: usize,
+    pub sync_client: Option<SyncClient>,
+    pub sync_status: SyncStatus,
+    pub last_synced_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl std::fmt::Debug for App {
@@ -105,7 +117,21 @@ impl App {
             project_counts: Vec::new(),
             selected_project_id: None,
             project_selected_index: 0,
+            sync_client: None,
+            sync_status: SyncStatus::Disabled,
+            last_synced_at: chrono::DateTime::from_timestamp(0, 0).unwrap_or(chrono::Utc::now()),
         }
+    }
+
+    /// Inject a SyncClient after construction (called from main.rs).
+    pub fn set_sync_client(&mut self, client: SyncClient) {
+        let is_auth = client.is_authenticated();
+        self.sync_client = Some(client);
+        self.sync_status = if is_auth {
+            SyncStatus::Synced
+        } else {
+            SyncStatus::Disabled
+        };
     }
 
     /// Load tasks from the database for the current user.
@@ -243,6 +269,9 @@ impl App {
                         KeyCode::Char('c') | KeyCode::Char('C') => {
                             self.clear_completed().await?
                         }
+                        KeyCode::Char('S') if key.modifiers.is_empty() => {
+                            self.sync().await?;
+                        }
                         KeyCode::Char('1') => {
                             self.current_view = View::Inbox;
                             self.selected_index = 0;
@@ -315,6 +344,27 @@ impl App {
                             if !name.is_empty() {
                                 let project = Project::new(self.user_id, name.clone());
                                 self.project_store.create(&project).await?;
+
+                                // Record project creation operation for sync
+                                let seq = self.op_store.get_next_seq(self.user_id, self.device_id).await?;
+                                let op = Operation {
+                                    op_id: Uuid::new_v4(),
+                                    user_id: self.user_id,
+                                    device_id: self.device_id,
+                                    seq,
+                                    entity: Entity::Project,
+                                    entity_id: project.id,
+                                    op_type: OperationType::Create,
+                                    payload: OperationPayload::ProjectCreate {
+                                        name: name.clone(),
+                                        color: None,
+                                        sort_order: 0,
+                                    },
+                                    created_at: chrono::Utc::now(),
+                                    synced_at: None,
+                                };
+                                self.op_store.append(&op).await?;
+
                                 self.status_message = Some(format!("Created project: {}", name));
                                 self.refresh_project_counts().await?;
                             }
@@ -918,6 +968,262 @@ impl App {
         Ok(())
     }
 
+    /// Perform a full sync cycle: upload local ops, download remote ops, apply them.
+    pub async fn sync(&mut self) -> Result<()> {
+        let client = match &self.sync_client {
+            Some(c) if c.is_authenticated() => c,
+            _ => {
+                self.sync_status = SyncStatus::Disabled;
+                return Ok(());
+            }
+        };
+
+        self.sync_status = SyncStatus::Syncing;
+
+        // 1. Upload local unsynced operations
+        match self.op_store.get_unsynced(self.user_id).await {
+            Ok(unsynced) if !unsynced.is_empty() => {
+                if let Err(e) = client.upload_operations(unsynced.clone()).await {
+                    self.sync_status = SyncStatus::Offline(format!("Upload failed: {}", e));
+                    self.status_message = Some(format!("Sync upload failed: {}", e));
+                    return Ok(());
+                }
+                let op_ids: Vec<Uuid> = unsynced.iter().map(|op| op.op_id).collect();
+                self.op_store.mark_synced(&op_ids).await?;
+            }
+            Ok(_) => {} // Nothing to upload
+            Err(e) => {
+                self.sync_status = SyncStatus::Offline(format!("DB error: {}", e));
+                self.status_message = Some(format!("Sync DB error: {}", e));
+                return Ok(());
+            }
+        }
+
+        // 2. Download remote operations created after last_synced_at
+        let remote_ops = match client.get_operations(self.last_synced_at).await {
+            Ok(ops) => ops,
+            Err(e) => {
+                self.sync_status = SyncStatus::Offline(format!("Download failed: {}", e));
+                self.status_message = Some(format!("Sync download failed: {}", e));
+                return Ok(());
+            }
+        };
+
+        // 3. Apply remote operations (skip our own)
+        let mut newest_time = self.last_synced_at;
+        let mut applied_count = 0;
+        for op in &remote_ops {
+            if op.created_at > newest_time {
+                newest_time = op.created_at;
+            }
+            if op.device_id == self.device_id || op.user_id != self.user_id {
+                continue;
+            }
+            if let Err(e) = self.apply_remote_operation(op).await {
+                eprintln!("Failed to apply remote op {:?}: {}", op.op_id, e);
+            } else {
+                applied_count += 1;
+            }
+        }
+        self.last_synced_at = newest_time;
+
+        // 4. Refresh UI
+        self.refresh_tasks().await?;
+
+        if applied_count > 0 {
+            self.sync_status = SyncStatus::Synced;
+            self.status_message = Some(format!("Synced ({} remote ops)", applied_count));
+        } else {
+            self.sync_status = SyncStatus::Synced;
+        }
+
+        Ok(())
+    }
+
+    /// Apply a single remote operation to the local database.
+    ///
+    /// Uses idempotent checks to avoid duplicates. Skips operations
+    /// that reference non-existent FK targets rather than crashing.
+    async fn apply_remote_operation(&mut self, op: &Operation) -> Result<()> {
+        match (&op.entity, &op.op_type) {
+            // ── Task Create ───────────────────────────────────────────
+            (Entity::Task, OperationType::Create) => {
+                if let OperationPayload::TaskCreate {
+                    title, description, status, project_id, tag_ids: _,
+                    priority, due_at, scheduled_at, recurrence_rule_id,
+                } = &op.payload {
+                    // Skip if already exists (idempotent)
+                    if self.task_store.get_by_id(op.entity_id).await?.is_some() {
+                        return Ok(());
+                    }
+
+                    // Guard: skip tag_ids that don't exist locally (FK constraint)
+                    // We skip all tags on remote tasks since we can't easily verify
+                    // tag existence without a TagStore lookup per tag.
+                    let valid_tag_ids: Vec<Uuid> = Vec::new();
+
+                    let mut task = Task::new(self.user_id, title.clone());
+                    task.id = op.entity_id;
+                    task.description = description.clone();
+                    task.status = status.clone();
+                    task.tag_ids = valid_tag_ids;
+                    task.priority = priority.clone();
+                    task.due_at = *due_at;
+                    task.scheduled_at = *scheduled_at;
+                    task.created_at = op.created_at;
+                    task.updated_at = op.created_at;
+
+                    // Only set project_id if the project exists locally
+                    if let Some(pid) = project_id {
+                        if self.project_store.get_by_id(*pid).await?.is_some() {
+                            task.project_id = Some(*pid);
+                        }
+                        // else: project doesn't exist yet — leave unassigned
+                    }
+
+                    // Only set recurrence_rule_id if the rule exists locally
+                    if let Some(rid) = recurrence_rule_id {
+                        if self.recurrence_store.get_by_id(*rid).await?.is_some() {
+                            task.recurrence_rule_id = Some(*rid);
+                        }
+                        // else: rule doesn't exist yet — leave unassigned
+                    }
+
+                    // Create without tag_ids (tag FK validation not available)
+                    self.task_store.create(&task).await?;
+                }
+            }
+
+            // ── Task Update ───────────────────────────────────────────
+            (Entity::Task, OperationType::Update) => {
+                if let Some(mut task) = self.task_store.get_by_id(op.entity_id).await? {
+                    if let OperationPayload::TaskUpdate {
+                        title, description, status, project_id, tag_ids: _,
+                        priority, due_at, scheduled_at, recurrence_rule_id,
+                        completed_at,
+                    } = &op.payload {
+                        if let Some(t) = title { task.title = t.clone(); }
+                        if let Some(d) = description { task.description = Some(d.clone()); }
+                        if let Some(s) = status { task.status = s.clone(); }
+                        if let Some(p) = project_id { task.project_id = Some(*p); }
+                        if let Some(p) = priority { task.priority = p.clone(); }
+                        if let Some(d) = due_at { task.due_at = Some(*d); }
+                        if let Some(d) = scheduled_at { task.scheduled_at = Some(*d); }
+                        if let Some(r) = recurrence_rule_id { task.recurrence_rule_id = Some(*r); }
+                        if let Some(c) = completed_at { task.completed_at = Some(*c); }
+                        task.updated_at = op.created_at;
+                        self.task_store.update(&task).await?;
+                    }
+                }
+                // Task doesn't exist locally — skip (may have been deleted on this device)
+            }
+
+            // ── Task Delete ───────────────────────────────────────────
+            (Entity::Task, OperationType::Delete) => {
+                self.task_store.soft_delete(op.entity_id).await?;
+            }
+
+            // ── Project Create ────────────────────────────────────────
+            (Entity::Project, OperationType::Create) => {
+                if let OperationPayload::ProjectCreate { name, color, sort_order } = &op.payload {
+                    if self.project_store.get_by_id(op.entity_id).await?.is_some() {
+                        return Ok(());
+                    }
+                    let project = Project {
+                        id: op.entity_id,
+                        user_id: self.user_id,
+                        name: name.clone(),
+                        color: color.clone(),
+                        sort_order: *sort_order,
+                        created_at: op.created_at,
+                        updated_at: op.created_at,
+                        archived_at: None,
+                    };
+                    self.project_store.create(&project).await?;
+                }
+            }
+
+            // ── Project Update ────────────────────────────────────────
+            (Entity::Project, OperationType::Update) => {
+                if let Some(mut project) = self.project_store.get_by_id(op.entity_id).await? {
+                    if let OperationPayload::ProjectUpdate { name, color, sort_order, archived_at } = &op.payload {
+                        if let Some(n) = name { project.name = n.clone(); }
+                        if let Some(c) = color { project.color = Some(c.clone()); }
+                        if let Some(s) = sort_order { project.sort_order = *s; }
+                        if let Some(a) = archived_at { project.archived_at = Some(*a); }
+                        project.updated_at = op.created_at;
+                        self.project_store.update(&project).await?;
+                    }
+                }
+            }
+
+            // ── Project Delete ────────────────────────────────────────
+            (Entity::Project, OperationType::Delete) => {
+                self.project_store.soft_delete(op.entity_id).await?;
+            }
+
+            // ── RecurrenceRule Create ─────────────────────────────────
+            (Entity::RecurrenceRule, OperationType::Create) => {
+                if let OperationPayload::RecurrenceRuleCreate {
+                    task_id, kind, interval, timezone,
+                    wait_for_completion, anchor_mode,
+                } = &op.payload {
+                    if self.recurrence_store.get_by_id(op.entity_id).await?.is_some() {
+                        return Ok(());
+                    }
+                    // Guard: only create if the referenced task exists locally
+                    if self.task_store.get_by_id(*task_id).await?.is_none() {
+                        return Ok(());
+                    }
+                    let now = op.created_at;
+                    let rule = todomrs_core::domain::RecurrenceRule {
+                        id: op.entity_id,
+                        task_id: *task_id,
+                        kind: deserialize_recurrence_kind(kind),
+                        interval: *interval,
+                        by_weekday: None,
+                        by_monthday: None,
+                        timezone: timezone.clone(),
+                        wait_for_completion: *wait_for_completion,
+                        anchor_mode: deserialize_anchor_mode(anchor_mode),
+                        created_at: now,
+                        updated_at: now,
+                    };
+                    self.recurrence_store.create(&rule).await?;
+                }
+            }
+
+            // ── RecurrenceRule Update ─────────────────────────────────
+            (Entity::RecurrenceRule, OperationType::Update) => {
+                if let Some(mut rule) = self.recurrence_store.get_by_id(op.entity_id).await? {
+                    if let OperationPayload::RecurrenceRuleUpdate {
+                        interval, wait_for_completion, anchor_mode,
+                    } = &op.payload {
+                        if let Some(i) = interval { rule.interval = *i; }
+                        if let Some(w) = wait_for_completion { rule.wait_for_completion = *w; }
+                        if let Some(a) = anchor_mode { rule.anchor_mode = deserialize_anchor_mode(a); }
+                        rule.updated_at = op.created_at;
+                        self.recurrence_store.update(&rule).await?;
+                    }
+                }
+            }
+
+            // ── RecurrenceRule Delete ─────────────────────────────────
+            (Entity::RecurrenceRule, OperationType::Delete) => {
+                self.recurrence_store.delete(op.entity_id).await?;
+            }
+
+            // ── Generic Delete (fallback for Tag, Reminder, etc.) ─────
+            (_, OperationType::Delete) => {
+                self.task_store.soft_delete(op.entity_id).await.ok();
+            }
+
+            _ => {} // Tag operations, reminders — skip for now
+        }
+
+        Ok(())
+    }
+
     /// Refresh project counts for sidebar display.
     async fn refresh_project_counts(&mut self) -> Result<()> {
         let projects = self.project_store.get_all(self.user_id).await?;
@@ -1067,6 +1373,22 @@ impl App {
 
         self.project_store.soft_delete(proj_id).await?;
 
+        // Record project deletion operation for sync
+        let seq = self.op_store.get_next_seq(self.user_id, self.device_id).await?;
+        let op = Operation {
+            op_id: Uuid::new_v4(),
+            user_id: self.user_id,
+            device_id: self.device_id,
+            seq,
+            entity: Entity::Project,
+            entity_id: proj_id,
+            op_type: OperationType::Delete,
+            payload: OperationPayload::Delete,
+            created_at: chrono::Utc::now(),
+            synced_at: None,
+        };
+        self.op_store.append(&op).await?;
+
         // Unlink tasks that were assigned to this project
         for task in self.tasks.iter_mut().filter(|t| t.project_id == Some(proj_id)) {
             task.project_id = None;
@@ -1140,5 +1462,26 @@ fn format_datetime_for_edit(dt: chrono::DateTime<chrono::Utc>) -> String {
         format!("{} {:02}:{:02}", date_part, time.hour(), time.minute())
     } else {
         date_part
+    }
+}
+
+// ── Sync deserialization helpers ─────────────────────────────────────
+
+/// Deserialize a recurrence kind string to its enum variant.
+fn deserialize_recurrence_kind(s: &str) -> todomrs_core::domain::RecurrenceKind {
+    match s.to_lowercase().as_str() {
+        "daily" => todomrs_core::domain::RecurrenceKind::Daily,
+        "weekly" => todomrs_core::domain::RecurrenceKind::Weekly,
+        "monthly" => todomrs_core::domain::RecurrenceKind::Monthly,
+        "yearly" => todomrs_core::domain::RecurrenceKind::Yearly,
+        _ => todomrs_core::domain::RecurrenceKind::Daily,
+    }
+}
+
+/// Deserialize an anchor mode string to its enum variant.
+fn deserialize_anchor_mode(s: &str) -> todomrs_core::domain::AnchorMode {
+    match s.to_lowercase().as_str() {
+        "completion" => todomrs_core::domain::AnchorMode::Completion,
+        _ => todomrs_core::domain::AnchorMode::Schedule,
     }
 }

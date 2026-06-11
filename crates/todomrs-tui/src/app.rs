@@ -372,6 +372,7 @@ impl App {
                                 self.op_store.append(&op).await?;
 
                                 self.status_message = Some(format!("Created project: {}", name));
+                                self.refresh_tasks().await?;
                                 self.request_sync_after_mutation();
                             }
                         } else {
@@ -726,6 +727,7 @@ impl App {
         };
 
         self.status_message = Some(format!("Updated {}", changed_parts));
+        self.refresh_tasks().await?;
         self.request_sync_after_mutation();
         Ok(())
     }
@@ -793,6 +795,7 @@ impl App {
         self.op_store.append(&op).await?;
 
         self.status_message = Some(format!("Created: {}", task.title));
+        self.refresh_tasks().await?;
         self.request_sync_after_mutation();
         Ok(())
     }
@@ -855,6 +858,7 @@ impl App {
         }
 
         self.status_message = Some(format!("{}: {}", description, task.title));
+        self.refresh_tasks().await?;
         self.request_sync_after_mutation();
         Ok(())
     }
@@ -893,6 +897,7 @@ impl App {
         }
 
         self.status_message = Some(format!("Deleted: {}", title));
+        self.refresh_tasks().await?;
         self.request_sync_after_mutation();
         Ok(())
     }
@@ -933,6 +938,7 @@ impl App {
 
         self.status_message = Some(format!("Cleared {} completed tasks", count));
         self.selected_index = 0;
+        self.refresh_tasks().await?;
         self.request_sync_after_mutation();
         Ok(())
     }
@@ -970,6 +976,7 @@ impl App {
             format_recurrence_rule(rule)
         ));
 
+        self.refresh_tasks().await?;
         self.request_sync_after_mutation();
         Ok(())
     }
@@ -1436,6 +1443,7 @@ impl App {
         }
 
         self.status_message = Some(format!("Deleted project: {}", name));
+        self.refresh_tasks().await?;
         self.request_sync_after_mutation();
         Ok(())
     }

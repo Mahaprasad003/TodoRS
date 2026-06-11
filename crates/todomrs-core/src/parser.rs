@@ -1,7 +1,7 @@
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Utc, Weekday};
 use uuid::Uuid;
 
-use crate::domain::{Priority, RecurrenceKind, RecurrenceRule, Task};
+use crate::domain::{AnchorMode, Priority, RecurrenceKind, RecurrenceRule, Task};
 
 /// Result of parsing a natural language quick-add string.
 #[derive(Debug, Clone, PartialEq)]
@@ -20,9 +20,12 @@ pub struct ParsedTask {
     pub due_time: Option<String>,
     /// Recurrence expression from `every ...` patterns.
     pub recurrence: Option<String>,
+    /// Whether `wait!` prefix was detected before recurrence.
+    pub wait_for_completion: bool,
+    /// Anchor mode detected from `every` vs `every!` prefix.
+    pub anchor_mode: AnchorMode,
 }
 
-/// Parses natural-language quick-add input into structured task fields.
 pub struct NaturalLanguageParser;
 
 impl NaturalLanguageParser {
@@ -46,11 +49,20 @@ impl NaturalLanguageParser {
         let mut due_date: Option<String> = None;
         let mut due_time: Option<String> = None;
         let mut recurrence: Option<String> = None;
+        let mut wait_for_completion: bool = false;
+        let mut anchor_mode: AnchorMode = AnchorMode::Schedule;
 
         let words: Vec<&str> = input.split_whitespace().collect();
         let mut i = 0;
         while i < words.len() {
             let word = words[i];
+
+            // ── wait! prefix ──────────────────────────────────────────
+            if word.eq_ignore_ascii_case("wait!") {
+                wait_for_completion = true;
+                i += 1;
+                continue;
+            }
 
             // ── due:prefix ──────────────────────────────────────────
             if let Some(pos) = word.find(':') {
@@ -95,8 +107,33 @@ impl NaturalLanguageParser {
                 // p0, p5, … fall through to title
             }
 
+            // ── every! … recurrence (completion-anchored) ───────────
+            if word.eq_ignore_ascii_case("every!") && i + 1 < words.len() {
+                anchor_mode = AnchorMode::Completion;
+                // Normalize: treat "every! N days" as "every N days" for parsing
+                // but keep anchor_mode set to Completion
+                let next = words[i + 1];
+                if is_period_word(next) {
+                    recurrence = Some(format!("every {}", next));
+                    i += 2;
+                    continue;
+                }
+                // every! N days/weeks/months/years
+                if i + 2 < words.len() {
+                    if let Ok(n) = next.parse::<i32>() {
+                        if n > 0 && is_period_word(words[i + 2]) {
+                            recurrence = Some(format!("every {} {}", next, words[i + 2]));
+                            i += 3;
+                            continue;
+                        }
+                    }
+                }
+                // fall through: "every!" didn't match pattern, treat as title
+            }
+
             // ── every … recurrence (two or three tokens) ────────────
             if word.eq_ignore_ascii_case("every") && i + 1 < words.len() {
+                anchor_mode = AnchorMode::Schedule;
                 let next = words[i + 1];
                 if is_period_word(next) {
                     recurrence = Some(format!("{} {}", word, next));
@@ -142,6 +179,8 @@ impl NaturalLanguageParser {
             due_date,
             due_time,
             recurrence,
+            wait_for_completion,
+            anchor_mode,
         }
     }
 
@@ -186,6 +225,8 @@ impl NaturalLanguageParser {
                 by_weekday: None,
                 by_monthday: None,
                 timezone: "UTC".to_string(),
+                wait_for_completion: parsed.wait_for_completion,
+                anchor_mode: parsed.anchor_mode,
                 created_at: now,
                 updated_at: now,
             })
@@ -430,6 +471,31 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_wait_prefix() {
+        let p = NaturalLanguageParser::parse("Task wait! every day");
+        assert_eq!(p.title, "Task");
+        assert_eq!(p.wait_for_completion, true);
+        assert_eq!(p.recurrence, Some("every day".to_string()));
+    }
+
+    #[test]
+    fn test_parse_every_bang_prefix() {
+        let p = NaturalLanguageParser::parse("Task every! week");
+        assert_eq!(p.title, "Task");
+        assert_eq!(p.anchor_mode, crate::domain::AnchorMode::Completion);
+        assert_eq!(p.recurrence, Some("every week".to_string()));
+    }
+
+    #[test]
+    fn test_parse_wait_and_every_bang() {
+        let p = NaturalLanguageParser::parse("Task wait! every! 3 days");
+        assert_eq!(p.title, "Task");
+        assert_eq!(p.wait_for_completion, true);
+        assert_eq!(p.anchor_mode, crate::domain::AnchorMode::Completion);
+        assert_eq!(p.recurrence, Some("every 3 days".to_string()));
+    }
+
+    #[test]
     fn test_parse_complex() {
         let input = "Submit assignment +vit @writing due:friday p2";
         let p = NaturalLanguageParser::parse(input);
@@ -492,6 +558,8 @@ mod tests {
             due_date: Some("today".to_string()),
             due_time: None,
             recurrence: None,
+            wait_for_completion: false,
+            anchor_mode: AnchorMode::Schedule,
         };
         let expected = Utc::now().naive_utc().date();
         assert_eq!(p.resolve_date(), Some(expected));
@@ -507,6 +575,8 @@ mod tests {
             due_date: Some("tomorrow".to_string()),
             due_time: None,
             recurrence: None,
+            wait_for_completion: false,
+            anchor_mode: AnchorMode::Schedule,
         };
         let expected = Utc::now().naive_utc().date() + Duration::days(1);
         assert_eq!(p.resolve_date(), Some(expected));
@@ -523,6 +593,8 @@ mod tests {
             due_date: Some("monday".to_string()),
             due_time: None,
             recurrence: None,
+            wait_for_completion: false,
+            anchor_mode: AnchorMode::Schedule,
         };
         let date = p.resolve_date().expect("should resolve");
         assert_eq!(date.weekday(), Weekday::Mon);
@@ -539,6 +611,8 @@ mod tests {
             due_date: None,
             due_time: Some("8pm".to_string()),
             recurrence: None,
+            wait_for_completion: false,
+            anchor_mode: AnchorMode::Schedule,
         };
         assert_eq!(p.resolve_time(), NaiveTime::from_hms_opt(20, 0, 0));
     }
@@ -553,6 +627,8 @@ mod tests {
             due_date: None,
             due_time: Some("9am".to_string()),
             recurrence: None,
+            wait_for_completion: false,
+            anchor_mode: AnchorMode::Schedule,
         };
         assert_eq!(p.resolve_time(), NaiveTime::from_hms_opt(9, 0, 0));
     }
@@ -567,6 +643,8 @@ mod tests {
             due_date: None,
             due_time: Some("12am".to_string()),
             recurrence: None,
+            wait_for_completion: false,
+            anchor_mode: AnchorMode::Schedule,
         };
         assert_eq!(p.resolve_time(), NaiveTime::from_hms_opt(0, 0, 0));
     }
@@ -581,6 +659,8 @@ mod tests {
             due_date: None,
             due_time: Some("12pm".to_string()),
             recurrence: None,
+            wait_for_completion: false,
+            anchor_mode: AnchorMode::Schedule,
         };
         assert_eq!(p.resolve_time(), NaiveTime::from_hms_opt(12, 0, 0));
     }
@@ -595,6 +675,8 @@ mod tests {
             due_date: Some("today".to_string()),
             due_time: None,
             recurrence: None,
+            wait_for_completion: false,
+            anchor_mode: AnchorMode::Schedule,
         };
         let dt = p.resolve_datetime().expect("should resolve");
         let today = Utc::now().naive_utc().date();
@@ -612,6 +694,8 @@ mod tests {
             due_date: None,
             due_time: Some("14:30".to_string()),
             recurrence: None,
+            wait_for_completion: false,
+            anchor_mode: AnchorMode::Schedule,
         };
         let dt = p.resolve_datetime().expect("should resolve");
         let today = Utc::now().naive_utc().date();

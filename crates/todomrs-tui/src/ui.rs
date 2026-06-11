@@ -51,7 +51,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let sidebar_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(7), // 5 view items + border (2)
+            Constraint::Length(8), // 6 view items + border (2)
             Constraint::Min(projects_height),
         ])
         .split(area);
@@ -63,6 +63,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         ListItem::new("Upcoming"),
         ListItem::new("Projects"),
         ListItem::new("Completed"),
+        ListItem::new("Recurring"),
     ];
 
     let view_selected = match app.current_view {
@@ -71,6 +72,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         View::Upcoming => 2,
         View::Projects => 3,
         View::Completed => 4,
+        View::Recurring => 5,
     };
 
     let view_list = List::new(view_items)
@@ -147,6 +149,7 @@ fn draw_main_content(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         View::Upcoming => "Upcoming",
         View::Projects => "Projects",
         View::Completed => "Completed",
+        View::Recurring => "Recurring",
     };
 
     let title = if app.current_view == View::Projects {
@@ -175,6 +178,8 @@ fn draw_main_content(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             "No tasks in this project."
         } else if app.current_view == View::Projects {
             "No projects yet. Press 'a' to create one."
+        } else if app.current_view == View::Recurring {
+            "No recurring tasks. Add one with 'every day' etc."
         } else {
             "No tasks. Press 'a' to add one."
         };
@@ -203,6 +208,28 @@ fn draw_main_content(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 "□ "
             };
 
+            // Get recurrence indicator if task has a recurrence rule
+            let recurrence_indicator = if let Some(rule_id) = task.recurrence_rule_id {
+                if let Some(rule) = app.recurrence_rules.get(&rule_id) {
+                    let interval_str = if rule.interval == 1 {
+                        String::new()
+                    } else {
+                        format!("{}", rule.interval)
+                    };
+                    let kind_str = match rule.kind {
+                        todomrs_core::domain::RecurrenceKind::Daily => format!("{}d", interval_str),
+                        todomrs_core::domain::RecurrenceKind::Weekly => format!("{}w", interval_str),
+                        todomrs_core::domain::RecurrenceKind::Monthly => format!("{}m", interval_str),
+                        todomrs_core::domain::RecurrenceKind::Yearly => format!("{}y", interval_str),
+                    };
+                    format!("♻{} ", kind_str)
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+
             let due_str = task
                 .due_at
                 .map(|dt| {
@@ -224,12 +251,12 @@ fn draw_main_content(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 format!(" [{}]", due_str)
             };
             let full_text =
-                format!("{}{}{}{}", status_icon, priority_indicator, task.title, suffix);
+                format!("{}{}{}{}{}", status_icon, priority_indicator, recurrence_indicator, task.title, suffix);
 
             if task.status == todomrs_core::domain::TaskStatus::Completed {
                 let title_and_suffix = format!("{}{}", task.title, suffix);
                 ListItem::new(Line::from(vec![
-                    ratatui::text::Span::raw(format!("{}{}", status_icon, priority_indicator)),
+                    ratatui::text::Span::raw(format!("{}{}{}", status_icon, priority_indicator, recurrence_indicator)),
                     ratatui::text::Span::styled(
                         title_and_suffix,
                         Style::default()
@@ -387,6 +414,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         View::Upcoming => "Upcoming",
         View::Projects => "Projects",
         View::Completed => "Completed",
+        View::Recurring => "Recurring",
     };
 
     let status = Line::from(vec![
@@ -451,6 +479,7 @@ fn draw_help(f: &mut Frame) {
         Line::from("  3      — Upcoming view"),
         Line::from("  4      — Projects view"),
         Line::from("  5      — Completed view"),
+        Line::from("  6      — Recurring view"),
         Line::from(""),
         Line::from("Task Operations:"),
         Line::from("  a      — Add task / Add project (in Projects view)"),
@@ -458,6 +487,11 @@ fn draw_help(f: &mut Frame) {
         Line::from("  x      — Toggle complete"),
         Line::from("  d      — Delete task"),
         Line::from("  C      — Clear all completed"),
+        Line::from(""),
+        Line::from("Recurrence:"),
+        Line::from("  every day/week/month  — Set recurrence"),
+        Line::from("  wait! every day       — Wait for completion"),
+        Line::from("  every! day            — Anchor to completion date"),
         Line::from(""),
         Line::from("Projects:"),
         Line::from("  Enter  — Select/deselect a project to filter by"),

@@ -1,9 +1,12 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use chrono::{Datelike, NaiveTime, Timelike, Weekday};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-use todomrs_core::domain::{Priority, Project, Task, TaskStatus};
+use todomrs_core::domain::{AnchorMode, Priority, Project, RecurrenceRule, Task, TaskStatus};
+use todomrs_core::RecurrenceEngine;
 use todomrs_core::NaturalLanguageParser;
-use todomrs_store::{OperationStore, ProjectStore, TaskStore};
+use todomrs_store::{OperationStore, ProjectStore, RecurrenceRuleStore, TaskStore};
 use todomrs_sync::operations::Operation;
 use uuid::Uuid;
 
@@ -14,6 +17,7 @@ pub enum View {
     Upcoming,
     Projects,
     Completed,
+    Recurring,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -42,6 +46,8 @@ pub struct App {
     pub task_store: TaskStore,
     pub op_store: OperationStore,
     pub project_store: ProjectStore,
+    pub recurrence_store: RecurrenceRuleStore,
+    pub recurrence_rules: HashMap<Uuid, RecurrenceRule>,  // keyed by rule.id
     pub status_message: Option<String>,
     pub project_counts: Vec<(Uuid, String, usize, usize)>,
     pub selected_project_id: Option<Uuid>,
@@ -74,6 +80,7 @@ impl App {
         task_store: TaskStore,
         op_store: OperationStore,
         project_store: ProjectStore,
+        recurrence_store: RecurrenceRuleStore,
     ) -> Self {
         Self {
             should_quit: false,
@@ -92,6 +99,8 @@ impl App {
             task_store,
             op_store,
             project_store,
+            recurrence_store,
+            recurrence_rules: HashMap::new(),
             status_message: None,
             project_counts: Vec::new(),
             selected_project_id: None,
@@ -103,6 +112,11 @@ impl App {
     pub async fn refresh_tasks(&mut self) -> Result<()> {
         self.tasks = self.task_store.get_all(self.user_id).await?;
         self.refresh_project_counts().await?;
+        
+        // Load all recurrence rules — keyed by rule.id, not task_id
+        let rules = self.recurrence_store.get_all().await?;
+        self.recurrence_rules = rules.into_iter().map(|r| (r.id, r)).collect();
+
         // Clamp selection to valid range
         let count = self.filtered_tasks().len();
         if count > 0 && self.selected_index >= count {
@@ -138,6 +152,11 @@ impl App {
                 .tasks
                 .iter()
                 .filter(|t| t.status == TaskStatus::Completed && t.deleted_at.is_none())
+                .collect(),
+            View::Recurring => self
+                .tasks
+                .iter()
+                .filter(|t| t.recurrence_rule_id.is_some() && t.deleted_at.is_none())
                 .collect(),
         };
 
@@ -250,6 +269,12 @@ impl App {
                         }
                         KeyCode::Char('5') => {
                             self.current_view = View::Completed;
+                            self.selected_index = 0;
+                            self.selected_project_id = None;
+                            self.previous_view = None;
+                        }
+                        KeyCode::Char('6') => {
+                            self.current_view = View::Recurring;
                             self.selected_index = 0;
                             self.selected_project_id = None;
                             self.previous_view = None;
@@ -519,6 +544,88 @@ impl App {
             task.project_id = None;
         }
 
+        // Handle recurrence changes on edit
+        let old_recurrence_rule_id = task.recurrence_rule_id;
+        match (&parsed.recurrence, task.recurrence_rule_id) {
+            (Some(_rec), None) => {
+                // New recurrence — create rule
+                let (_, rule_opt) = NaturalLanguageParser::create_task_from_input(&input, self.user_id);
+                if let Some(mut rule) = rule_opt {
+                    // Fix: parser creates rule with throwaway task_id — use actual task
+                    rule.task_id = task_id;
+                    self.recurrence_store.create(&rule).await?;
+                    task.recurrence_rule_id = Some(rule.id);
+
+                    let seq = self.op_store.get_next_seq(self.user_id, self.device_id).await?;
+                    let op_op = Operation::create_recurrence_rule(self.user_id, self.device_id, seq, &rule);
+                    self.op_store.append(&op_op).await?;
+                }
+            }
+            (Some(_rec), Some(rule_id)) => {
+                // Changed recurrence — update existing rule
+                if let Some(mut rule) = self.recurrence_rules.get(&rule_id).cloned() {
+                    let (_, new_rule_opt) = NaturalLanguageParser::create_task_from_input(&input, self.user_id);
+                    if let Some(new_rule) = new_rule_opt {
+                        // Only update if something actually changed
+                        if rule.interval != new_rule.interval
+                            || rule.kind != new_rule.kind
+                            || rule.wait_for_completion != new_rule.wait_for_completion
+                            || rule.anchor_mode != new_rule.anchor_mode
+                        {
+                            rule.interval = new_rule.interval;
+                            rule.kind = new_rule.kind;
+                            rule.wait_for_completion = new_rule.wait_for_completion;
+                            rule.anchor_mode = new_rule.anchor_mode;
+                            rule.updated_at = chrono::Utc::now();
+                            self.recurrence_store.update(&rule).await?;
+
+                            // Sync: record rule update operation
+                            let seq = self.op_store.get_next_seq(self.user_id, self.device_id).await?;
+                            let rule_op = Operation {
+                                op_id: Uuid::new_v4(),
+                                user_id: self.user_id,
+                                device_id: self.device_id,
+                                seq,
+                                entity: todomrs_sync::operations::Entity::RecurrenceRule,
+                                entity_id: rule.id,
+                                op_type: todomrs_sync::operations::OperationType::Update,
+                                payload: todomrs_sync::operations::OperationPayload::RecurrenceRuleUpdate {
+                                    interval: Some(rule.interval),
+                                    wait_for_completion: Some(rule.wait_for_completion),
+                                    anchor_mode: Some(serde_json::to_value(&rule.anchor_mode).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()),
+                                },
+                                created_at: chrono::Utc::now(),
+                                synced_at: None,
+                            };
+                            self.op_store.append(&rule_op).await?;
+                        }
+                    }
+                }
+            }
+            (None, Some(rule_id)) => {
+                // Removed recurrence — delete rule
+                self.recurrence_store.delete(rule_id).await?;
+                task.recurrence_rule_id = None;
+
+                // Sync: record rule delete operation
+                let seq = self.op_store.get_next_seq(self.user_id, self.device_id).await?;
+                let del_op = Operation {
+                    op_id: Uuid::new_v4(),
+                    user_id: self.user_id,
+                    device_id: self.device_id,
+                    seq,
+                    entity: todomrs_sync::operations::Entity::RecurrenceRule,
+                    entity_id: rule_id,
+                    op_type: todomrs_sync::operations::OperationType::Delete,
+                    payload: todomrs_sync::operations::OperationPayload::Delete,
+                    created_at: chrono::Utc::now(),
+                    synced_at: None,
+                };
+                self.op_store.append(&del_op).await?;
+            }
+            (None, None) => {} // No change
+        }
+
         self.task_store.update(task).await?;
 
         // Record update operation
@@ -540,7 +647,7 @@ impl App {
                 priority: Some(priority),
                 due_at: due_at,
                 scheduled_at: None,
-                recurrence_rule_id: None,
+                recurrence_rule_id: task.recurrence_rule_id,
                 completed_at: None,
             },
             created_at: chrono::Utc::now(),
@@ -555,6 +662,9 @@ impl App {
             }
             if task.project_id != old_project_id {
                 parts.push(format!("project"));
+            }
+            if task.recurrence_rule_id != old_recurrence_rule_id {
+                parts.push(format!("recurrence"));
             }
             parts.join(", ")
         };
@@ -571,7 +681,7 @@ impl App {
             return Ok(());
         }
 
-        let (mut task, _recurrence_rule) =
+        let (mut task, recurrence_rule) =
             NaturalLanguageParser::create_task_from_input(&input, self.user_id);
 
         // Handle +project: look up or create project
@@ -610,10 +720,18 @@ impl App {
             task.project_id = Some(project_id);
         }
 
-        // Persist task
+        // Persist task FIRST (rule FK depends on task existing)
         self.task_store.create(&task).await?;
 
-        // Record operation for sync
+        // Persist recurrence rule if present (AFTER task, due to FK constraint)
+        if let Some(rule) = &recurrence_rule {
+            self.recurrence_store.create(rule).await?;
+            let seq = self.op_store.get_next_seq(self.user_id, self.device_id).await?;
+            let op = Operation::create_recurrence_rule(self.user_id, self.device_id, seq, rule);
+            self.op_store.append(&op).await?;
+        }
+
+        // Record task operation for sync
         let seq = self.op_store.get_next_seq(self.user_id, self.device_id).await?;
         let op = Operation::create_task(self.user_id, self.device_id, seq, &task);
         self.op_store.append(&op).await?;
@@ -669,6 +787,16 @@ impl App {
         task.updated_at = chrono::Utc::now();
         self.task_store.update(&task).await?;
         self.op_store.append(&op).await?;
+
+        // When completing a recurring task, spawn the next instance
+        if !completed {
+            if let Some(rule_id) = task.recurrence_rule_id {
+                if let Some(rule) = self.recurrence_rules.get(&rule_id).cloned() {
+                    self.spawn_next_recurrence(&task, &rule).await?;
+                    return Ok(()); // refresh handled by spawn_next
+                }
+            }
+        }
 
         self.status_message = Some(format!("{}: {}", description, task.title));
         self.refresh_tasks().await?;
@@ -749,6 +877,43 @@ impl App {
 
         self.status_message = Some(format!("Cleared {} completed tasks", count));
         self.selected_index = 0;
+        self.refresh_tasks().await?;
+        Ok(())
+    }
+
+    /// Create the next instance of a recurring task after completion.
+    async fn spawn_next_recurrence(&mut self, completed_task: &Task, rule: &RecurrenceRule) -> Result<()> {
+        // Determine anchor date for next occurrence
+        let anchor = match rule.anchor_mode {
+            AnchorMode::Schedule => completed_task.due_at.unwrap_or(completed_task.created_at),
+            AnchorMode::Completion => completed_task.completed_at.unwrap_or_else(chrono::Utc::now),
+        };
+
+        // Compute next due date
+        let next_due = RecurrenceEngine::next_occurrence(rule, anchor);
+
+        // Create new task instance (independent copy)
+        let mut new_task = Task::new(self.user_id, completed_task.title.clone());
+        new_task.project_id = completed_task.project_id;
+        new_task.tag_ids = completed_task.tag_ids.clone();
+        new_task.priority = completed_task.priority.clone();
+        new_task.due_at = Some(next_due);
+        new_task.recurrence_rule_id = Some(rule.id); // links back to the same rule
+
+        // Persist
+        self.task_store.create(&new_task).await?;
+
+        // Record operation
+        let seq = self.op_store.get_next_seq(self.user_id, self.device_id).await?;
+        let op = Operation::create_task(self.user_id, self.device_id, seq, &new_task);
+        self.op_store.append(&op).await?;
+
+        self.status_message = Some(format!(
+            "Completed: {} | Next: {}",
+            completed_task.title,
+            format_recurrence_rule(rule)
+        ));
+
         self.refresh_tasks().await?;
         Ok(())
     }
@@ -845,6 +1010,35 @@ impl App {
             parts.push(format_datetime_for_edit(dt));
         }
 
+        // Recurrence pattern
+        if let Some(rule_id) = task.recurrence_rule_id {
+            if let Some(rule) = self.recurrence_rules.get(&rule_id) {
+                // Prefix for wait_for_completion
+                if rule.wait_for_completion {
+                    parts.push("wait!".to_string());
+                }
+
+                // Prefix for anchor_mode
+                let every_prefix = match rule.anchor_mode {
+                    AnchorMode::Completion => "every!",
+                    AnchorMode::Schedule => "every",
+                };
+
+                let kind_str = match rule.kind {
+                    todomrs_core::domain::RecurrenceKind::Daily => "day",
+                    todomrs_core::domain::RecurrenceKind::Weekly => "week",
+                    todomrs_core::domain::RecurrenceKind::Monthly => "month",
+                    todomrs_core::domain::RecurrenceKind::Yearly => "year",
+                };
+
+                parts.push(if rule.interval == 1 {
+                    format!("{} {}", every_prefix, kind_str)
+                } else {
+                    format!("{} {} {}", every_prefix, rule.interval, kind_str)
+                });
+            }
+        }
+
         parts.join(" ")
     }
 
@@ -887,6 +1081,33 @@ impl App {
         self.refresh_tasks().await?;
         Ok(())
     }
+}
+
+/// Format a recurrence rule into a human-readable string.
+pub fn format_recurrence_rule(rule: &RecurrenceRule) -> String {
+    let kind_str = match rule.kind {
+        todomrs_core::domain::RecurrenceKind::Daily => "day",
+        todomrs_core::domain::RecurrenceKind::Weekly => "week",
+        todomrs_core::domain::RecurrenceKind::Monthly => "month",
+        todomrs_core::domain::RecurrenceKind::Yearly => "year",
+    };
+
+    let base = if rule.interval == 1 {
+        format!("every {}", kind_str)
+    } else {
+        format!("every {} {}s", rule.interval, kind_str)
+    };
+
+    let prefix = match rule.wait_for_completion {
+        true => "wait! ",
+        false => "",
+    };
+    let suffix = match rule.anchor_mode {
+        AnchorMode::Completion => " (from completion)",
+        AnchorMode::Schedule => "",
+    };
+
+    format!("{}{}{}", prefix, base, suffix)
 }
 
 /// Format a DateTime for natural-language editing (parser-friendly).

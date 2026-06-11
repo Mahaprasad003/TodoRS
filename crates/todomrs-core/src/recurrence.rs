@@ -1,7 +1,7 @@
 use chrono::{DateTime, Duration, Months, Utc};
 use uuid::Uuid;
 
-use crate::domain::{RecurrenceKind, RecurrenceRule};
+use crate::domain::{AnchorMode, RecurrenceKind, RecurrenceRule};
 
 /// Stateless engine for computing recurrence occurrences.
 pub struct RecurrenceEngine;
@@ -37,6 +37,8 @@ impl RecurrenceEngine {
             by_weekday: None,
             by_monthday: None,
             timezone: "UTC".to_string(),
+            wait_for_completion: false,
+            anchor_mode: AnchorMode::Schedule,
             created_at: now,
             updated_at: now,
         }
@@ -53,6 +55,8 @@ impl RecurrenceEngine {
             by_weekday: None,
             by_monthday: None,
             timezone: "UTC".to_string(),
+            wait_for_completion: false,
+            anchor_mode: AnchorMode::Schedule,
             created_at: now,
             updated_at: now,
         }
@@ -76,6 +80,8 @@ mod tests {
             by_weekday: None,
             by_monthday: None,
             timezone: "UTC".to_string(),
+            wait_for_completion: false,
+            anchor_mode: AnchorMode::Schedule,
             created_at: now,
             updated_at: now,
         }

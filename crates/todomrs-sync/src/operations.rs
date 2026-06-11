@@ -92,6 +92,19 @@ pub enum OperationPayload {
         color: Option<String>,
     },
     Delete,
+    RecurrenceRuleCreate {
+        task_id: Uuid,
+        kind: String,
+        interval: i32,
+        timezone: String,
+        wait_for_completion: bool,
+        anchor_mode: String,
+    },
+    RecurrenceRuleUpdate {
+        interval: Option<i32>,
+        wait_for_completion: Option<bool>,
+        anchor_mode: Option<String>,
+    },
 }
 
 impl Operation {
@@ -177,6 +190,41 @@ impl Operation {
             synced_at: None,
         }
     }
+
+    pub fn create_recurrence_rule(
+        user_id: Uuid,
+        device_id: Uuid,
+        seq: i64,
+        rule: &todomrs_core::domain::RecurrenceRule,
+    ) -> Self {
+        Self {
+            op_id: Uuid::new_v4(),
+            user_id,
+            device_id,
+            seq,
+            entity: Entity::RecurrenceRule,
+            entity_id: rule.id,
+            op_type: OperationType::Create,
+            payload: OperationPayload::RecurrenceRuleCreate {
+                task_id: rule.task_id,
+                kind: serialize_enum(&rule.kind),
+                interval: rule.interval,
+                timezone: rule.timezone.clone(),
+                wait_for_completion: rule.wait_for_completion,
+                anchor_mode: serialize_enum(&rule.anchor_mode),
+            },
+            created_at: Utc::now(),
+            synced_at: None,
+        }
+    }
+}
+
+/// Serialize a serde-compatible enum to its string representation.
+fn serialize_enum<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -245,6 +293,47 @@ mod tests {
             assert_eq!(title.as_deref(), Some("New title"));
         } else {
             panic!("Expected TaskUpdate payload");
+        }
+    }
+
+    #[test]
+    fn test_create_recurrence_rule_operation() {
+        let user_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+        let rule = todomrs_core::domain::RecurrenceRule {
+            id: Uuid::new_v4(),
+            task_id: Uuid::new_v4(),
+            kind: todomrs_core::domain::RecurrenceKind::Daily,
+            interval: 2,
+            by_weekday: None,
+            by_monthday: None,
+            timezone: "UTC".to_string(),
+            wait_for_completion: true,
+            anchor_mode: todomrs_core::domain::AnchorMode::Completion,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let op = Operation::create_recurrence_rule(user_id, device_id, 1, &rule);
+
+        assert_eq!(op.entity, Entity::RecurrenceRule);
+        assert_eq!(op.entity_id, rule.id);
+        assert_eq!(op.op_type, OperationType::Create);
+
+        if let OperationPayload::RecurrenceRuleCreate {
+            ref kind,
+            interval,
+            ref anchor_mode,
+            wait_for_completion,
+            ..
+        } = op.payload
+        {
+            assert_eq!(kind, "daily");
+            assert_eq!(interval, 2);
+            assert_eq!(anchor_mode, "completion");
+            assert_eq!(wait_for_completion, true);
+        } else {
+            panic!("Expected RecurrenceRuleCreate payload");
         }
     }
 }

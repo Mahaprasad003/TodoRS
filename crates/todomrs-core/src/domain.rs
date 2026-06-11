@@ -92,6 +92,8 @@ pub struct RecurrenceRule {
     pub by_weekday: Option<Vec<i32>>,
     pub by_monthday: Option<Vec<i32>>,
     pub timezone: String,
+    pub wait_for_completion: bool,
+    pub anchor_mode: AnchorMode,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -103,6 +105,13 @@ pub enum RecurrenceKind {
     Weekly,
     Monthly,
     Yearly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnchorMode {
+    Schedule,
+    Completion,
 }
 
 #[cfg(test)]
@@ -250,6 +259,26 @@ mod tests {
         assert_eq!(json, "\"pending\"");
         let json = serde_json::to_string(&TaskStatus::Completed).unwrap();
         assert_eq!(json, "\"completed\"");
+    }
+
+    #[test]
+    fn test_recurrence_rule_serde_roundtrip() {
+        let rule = RecurrenceRule {
+            id: Uuid::new_v4(),
+            task_id: Uuid::new_v4(),
+            kind: RecurrenceKind::Daily,
+            interval: 2,
+            by_weekday: None,
+            by_monthday: None,
+            timezone: "UTC".to_string(),
+            wait_for_completion: true,
+            anchor_mode: AnchorMode::Completion,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&rule).expect("serialize");
+        let deserialized: RecurrenceRule = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(rule, deserialized);
     }
 }
 

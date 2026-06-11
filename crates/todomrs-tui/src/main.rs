@@ -10,7 +10,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
-use todomrs_store::{Database, OperationStore, ProjectStore, TaskStore};
+use todomrs_store::{Database, OperationStore, ProjectStore, RecurrenceRuleStore, TaskStore};
 use uuid::Uuid;
 
 /// Load a persistent UUID from a file, or create one if it doesn't exist.
@@ -57,6 +57,7 @@ async fn run_async(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Res
     let task_store = TaskStore::new(db.pool().clone());
     let op_store = OperationStore::new(db.pool().clone());
     let project_store = ProjectStore::new(db.pool().clone());
+    let recurrence_store = RecurrenceRuleStore::new(db.pool().clone());
 
     // Load or create persistent device identity
     let user_id = load_or_create_id(".todomrs_user_id");
@@ -69,7 +70,7 @@ async fn run_async(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Res
         .execute(db.pool())
         .await?;
 
-    let mut app = App::new(user_id, device_id, task_store, op_store, project_store);
+    let mut app = App::new(user_id, device_id, task_store, op_store, project_store, recurrence_store);
     app.refresh_tasks().await?;
 
     loop {

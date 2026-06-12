@@ -91,7 +91,8 @@ impl SyncClient {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Not authenticated"))?;
 
-        self.client
+        let response = self
+            .client
             .post(format!(
                 "{}/functions/v1/upload-operations",
                 self.base_url
@@ -101,6 +102,16 @@ impl SyncClient {
             .json(&serde_json::json!({ "operations": operations }))
             .send()
             .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "upload-operations failed {}: {}",
+                status,
+                body
+            ));
+        }
 
         Ok(())
     }

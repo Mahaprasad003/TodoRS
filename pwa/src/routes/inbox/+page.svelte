@@ -6,6 +6,7 @@
   import { goto } from '$app/navigation';
   import TaskList from '$lib/components/shared/TaskList.svelte';
   import QuickAdd from '$lib/components/shared/QuickAdd.svelte';
+  import { confirm } from '$lib/stores/confirm';
 
   // Read project filter from query param
   $: projectFilter = $page.url.searchParams.get('project');
@@ -43,8 +44,9 @@
         <button
           type="button"
           class="btn btn-danger"
-          on:click={() => {
-            if (confirm('Delete project "' + selectedProject.name + '"?')) {
+          on:click={async () => {
+            const ok = await confirm({ title: 'Delete project', message: 'Delete "' + selectedProject.name + '"? All tasks in this project will remain but become unassigned.', confirmLabel: 'Delete', danger: true });
+            if (ok) {
               const pid = projectFilter!;
               removeProject(pid);
               goto('/inbox');

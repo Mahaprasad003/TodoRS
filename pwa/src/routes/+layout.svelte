@@ -12,12 +12,22 @@
   import FloatingAddButton from '$lib/components/shared/FloatingAddButton.svelte';
   import AddTaskModal from '$lib/components/shared/AddTaskModal.svelte';
   import SearchOverlay from '$lib/components/shared/SearchOverlay.svelte';
+  import ConfirmDialog from '$lib/components/shared/ConfirmDialog.svelte';
+  import { confirm, confirmStore, confirmResponse } from '$lib/stores/confirm';
   import { openSearch } from '$lib/stores/search';
   import { editingTask, closeEdit } from '$lib/stores/edit';
   import '../app.css';
 
   let showAddModal = false;
   let syncInterval: ReturnType<typeof setInterval> | null = null;
+  let toastMessage = '';
+  let toastTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  function showToast(msg: string) {
+    toastMessage = msg;
+    if (toastTimeout) clearTimeout(toastTimeout);
+    toastTimeout = setTimeout(() => { toastMessage = ''; }, 2500);
+  }
 
   // Open modal in edit mode when a task is tapped
   $: if ($editingTask) {
@@ -197,7 +207,10 @@
 
       <div class="sidebar-footer">
         <SyncStatus />
-        <button class="btn btn-tertiary sidebar-signout" on:click={handleSignOut}>
+        <button class="btn btn-tertiary sidebar-signout" on:click={() => {
+            const confirmed = confirm({ title: 'Sign out', message: 'Are you sure you want to sign out? Your local data will remain on this device.', confirmLabel: 'Sign Out', danger: true });
+            confirmed.then(ok => { if (ok) handleSignOut(); });
+          }}>
           Sign out
         </button>
       </div>
@@ -211,9 +224,25 @@
             <SyncStatus />
           </span>
         </div>
+        <div class="top-nav-center">
+          <button class="btn btn-primary top-add-btn" on:click={() => { closeEdit(); showAddModal = true; }}>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M8 3V13M3 8H13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+            Add Task
+          </button>
+        </div>
         <div class="top-nav-right">
           <span class="current-user">{ user?.email }</span>
-          <button class="btn btn-tertiary" on:click={handleSignOut}>Sign out</button>
+          <button class="btn btn-tertiary sign-out-btn" on:click={() => {
+            const confirmed = confirm({ title: 'Sign out', message: 'Are you sure you want to sign out? Your local data will remain on this device.', confirmLabel: 'Sign Out', danger: true });
+            confirmed.then(ok => { if (ok) handleSignOut(); });
+          }}>
+            <span class="sign-out-label">Sign out</span>
+            <svg class="sign-out-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M6 2H3C2.44772 2 2 2.44772 2 3V13C2 13.5523 2.44772 14 3 14H6M10 11L13 8L10 5M13 8H6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
         </div>
       </header>
 
@@ -229,10 +258,32 @@
     bind:show={showAddModal}
     task={$editingTask}
     on:close={() => { showAddModal = false; closeEdit(); }}
+    on:saved={(e) => { showToast(`Task ${e.detail.action}: ${e.detail.title}`); }}
   />
+
+  {#if toastMessage}
+    <div class="global-toast">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+        <path d="M4 8L7 11L12 5" stroke="var(--color-success)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      {toastMessage}
+    </div>
+  {/if}
 
   <!-- Search Overlay (global) -->
   <SearchOverlay />
+
+  <!-- Global Confirm Dialog (driven by confirm store) -->
+  <ConfirmDialog
+    show={$confirmStore.show}
+    title={$confirmStore.options.title}
+    message={$confirmStore.options.message}
+    confirmLabel={$confirmStore.options.confirmLabel || 'Confirm'}
+    cancelLabel={$confirmStore.options.cancelLabel || 'Cancel'}
+    danger={$confirmStore.options.danger || false}
+    on:confirm={() => confirmResponse(true)}
+    on:cancel={() => confirmResponse(false)}
+  />
 
   <!-- Mobile Bottom Navigation -->
   <Navigation />
@@ -361,16 +412,46 @@
     gap: var(--space-sm);
   }
 
+  .top-nav-center {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+  }
+
+  .top-add-btn {
+    gap: var(--space-xs);
+  }
+
   .top-nav-right {
     display: flex;
     align-items: center;
     gap: var(--space-xs);
   }
 
+  .sign-out-icon {
+    display: none;
+  }
+
   @media (max-width: 767px) {
-    .top-nav-right .current-user,
-    .top-nav-right .btn-tertiary {
+    .top-nav-center {
       display: none;
+    }
+
+    .top-nav-right .current-user {
+      display: none;
+    }
+
+    .top-nav-right .sign-out-label {
+      display: none;
+    }
+
+    .top-nav-right .sign-out-icon {
+      display: block;
+    }
+
+    .top-nav-right .sign-out-btn {
+      padding: var(--space-xs);
+      min-width: unset;
     }
   }
 
@@ -405,5 +486,45 @@
   .loading-text {
     font-size: var(--text-body-sm);
     color: var(--color-ink-subtle);
+  }
+
+  .global-toast {
+    position: fixed;
+    bottom: calc(64px + var(--space-lg));
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 500;
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    padding: var(--space-sm) var(--space-lg);
+    font-size: var(--text-body-sm);
+    color: var(--color-ink);
+    background-color: var(--color-surface-2);
+    border: 1px solid var(--color-hairline);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+    animation: toastIn 0.2s ease;
+    white-space: nowrap;
+    max-width: 90vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  @keyframes toastIn {
+    from {
+      opacity: 0;
+      transform: translateX(-50%) translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+  }
+
+  @media (min-width: 768px) {
+    .global-toast {
+      bottom: var(--space-lg);
+    }
   }
 </style>

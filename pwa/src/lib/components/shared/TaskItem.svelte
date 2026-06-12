@@ -3,6 +3,7 @@
   import type { TaskRecord } from '$lib/db/schema';
   import { getProject } from '$lib/db/projects';
   import { openEdit } from '$lib/stores/edit';
+  import { confirm } from '$lib/stores/confirm';
 
   export let task: TaskRecord;
 
@@ -22,7 +23,8 @@
   }
 
   async function handleDelete() {
-    if (confirm('Delete this task?')) {
+    const ok = await confirm({ title: 'Delete task', message: 'This task will be moved to the archive.', confirmLabel: 'Delete', danger: true });
+    if (ok) {
       await removeTask(task.id);
     }
   }
@@ -270,5 +272,12 @@
     display: flex;
     align-items: center;
     gap: 2px;
+  }
+
+  /* Hide delete button on mobile — swipe handles it */
+  @media (max-width: 767px) {
+    .task-item .btn-icon {
+      display: none;
+    }
   }
 </style>

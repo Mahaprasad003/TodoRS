@@ -1051,13 +1051,20 @@ impl App {
         };
 
         // 3. Apply remote operations (skip our own)
+        //    Use the Supabase auth user ID for the check, since operations from
+        //    other clients (e.g. PWA) will have the Supabase user ID. Fall back
+        //    to the local user_id if sync client doesn't have the supabase ID yet.
+        let expected_user_id = self.sync_client
+            .as_ref()
+            .and_then(|c| c.supabase_user_id())
+            .unwrap_or(self.user_id);
         let mut newest_time = self.last_synced_at;
         let mut applied_count = 0;
         for op in &remote_ops {
             if op.created_at > newest_time {
                 newest_time = op.created_at;
             }
-            if op.device_id == self.device_id || op.user_id != self.user_id {
+            if op.device_id == self.device_id || op.user_id != expected_user_id {
                 continue;
             }
             if let Err(e) = self.apply_remote_operation(op).await {

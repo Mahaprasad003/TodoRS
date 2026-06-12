@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use reqwest::Client;
+use uuid::Uuid;
 
 /// A client for syncing operations with the Supabase backend.
 ///
@@ -11,6 +12,7 @@ pub struct SyncClient {
     base_url: String,
     api_key: String,
     access_token: Option<String>,
+    supabase_user_id: Option<Uuid>,
 }
 
 impl SyncClient {
@@ -27,6 +29,7 @@ impl SyncClient {
             base_url,
             api_key,
             access_token: None,
+            supabase_user_id: None,
         }
     }
 
@@ -37,7 +40,7 @@ impl SyncClient {
 
     /// Authenticate with email and password.
     ///
-    /// Stores the access token internally for subsequent API calls.
+    /// Stores the access token and supabase user ID internally for subsequent API calls.
     /// Returns the access token string.
     pub async fn login(&mut self, email: &str, password: &str) -> Result<String> {
         let response = self
@@ -57,7 +60,23 @@ impl SyncClient {
             .and_then(|v| v.as_str())
             .map(String::from);
 
+        // Capture the real Supabase auth user ID from the login response
+        if let Some(user_id_str) = data
+            .get("user")
+            .and_then(|u| u.get("id"))
+            .and_then(|v| v.as_str())
+        {
+            if let Ok(uid) = Uuid::parse_str(user_id_str) {
+                self.supabase_user_id = Some(uid);
+            }
+        }
+
         Ok(self.access_token.clone().unwrap_or_default())
+    }
+
+    /// Returns the authenticated Supabase user ID, if available.
+    pub fn supabase_user_id(&self) -> Option<Uuid> {
+        self.supabase_user_id
     }
 
     /// Upload a batch of operations to the backend.
@@ -105,24 +124,34 @@ impl SyncClient {
 
         let response = self
             .client
-            .get(format!(
-                "{}/functions/v1/get-operations?since={}",
-                self.base_url,
-                urlencoding(&since_str)
-            ))
+            .get(format!("{}/functions/v1/get-operations", self.base_url))
+            .query(&[("since", since_str.as_str())])
             .header("apikey", &self.api_key)
             .header("Authorization", format!("Bearer {}", token))
             .send()
             .await?;
 
-        let data: serde_json::Value = response.json().await?;
+        let status = response.status();
+        let body = response.text().await?;
+
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "get-operations failed {}: {}",
+                status,
+                body
+            ));
+        }
+
+        let data: serde_json::Value = serde_json::from_str(&body)?;
         let operations = data
             .get("operations")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
 
-        // Deserialize operations
+        // Deserialize operations, silently skipping any that don't match
+        // the current schema (legacy operations with uppercase casing or
+        // flat payloads are known to exist in the database).
         let ops: Vec<super::operations::Operation> = operations
             .into_iter()
             .filter_map(|op| serde_json::from_value(op).ok())
@@ -132,7 +161,4 @@ impl SyncClient {
     }
 }
 
-/// Minimal URL-encoding for the timestamp parameter.
-fn urlencoding(s: &str) -> String {
-    s.replace(':', "%3A")
-}
+

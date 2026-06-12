@@ -144,6 +144,22 @@ impl App {
         };
     }
 
+    /// Load the last_synced_at timestamp from the persisted metadata table.
+    pub async fn load_sync_state(&mut self) {
+        if let Ok(row) = sqlx::query_as::<_, (String,)>(
+            "SELECT value FROM metadata WHERE key = 'last_synced_at'",
+        )
+        .fetch_optional(self.task_store.pool())
+        .await
+        {
+            if let Some((ts,)) = row {
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&ts) {
+                    self.last_synced_at = dt.with_timezone(&chrono::Utc);
+                }
+            }
+        }
+    }
+
     /// Load tasks from the database for the current user.
     pub async fn refresh_tasks(&mut self) -> Result<()> {
         self.tasks = self.task_store.get_all(self.user_id).await?;
@@ -1075,6 +1091,13 @@ impl App {
             }
         }
         self.last_synced_at = newest_time;
+
+        // Persist last_synced_at across restarts
+        let ts = self.last_synced_at.to_rfc3339();
+        let _ = sqlx::query("INSERT OR REPLACE INTO metadata (key, value) VALUES ('last_synced_at', ?)")
+            .bind(&ts)
+            .execute(self.task_store.pool())
+            .await;
 
         // 4. Refresh UI
         self.refresh_tasks().await?;

@@ -190,6 +190,9 @@ async fn run_async(
         app.set_sync_client(client);
     }
 
+    // Load persisted sync state (last_synced_at) so we don't redownload everything
+    app.load_sync_state().await;
+
     app.refresh_tasks().await?;
 
     // Initial sync

@@ -6,7 +6,6 @@ mod ui;
 use anyhow::Result;
 use app::App;
 use config::Config;
-use sqlx::SqlitePool;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture},
     execute,
@@ -61,13 +60,10 @@ async fn cmd_login() -> Result<()> {
                 new_config.email = email;
                 new_config.password = password;
                 new_config.save()?;
-                // Clear persisted sync state so the new account downloads everything fresh
-                if let Ok(pool) = SqlitePool::connect("sqlite://./todomrs.db?mode=rwc").await {
-                    let _ = sqlx::query("DELETE FROM metadata WHERE key = 'last_synced_at'")
-                        .execute(&pool)
-                        .await;
-                    pool.close().await;
-                }
+                // Clear local database so the new account starts fresh
+                let _ = std::fs::remove_file("./todomrs.db");
+                let _ = std::fs::remove_file("./todomrs.db-wal");
+                let _ = std::fs::remove_file("./todomrs.db-shm");
                 println!("Login successful. Credentials saved to config.");
                 return Ok(());
             }

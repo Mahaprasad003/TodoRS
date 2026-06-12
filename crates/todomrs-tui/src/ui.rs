@@ -1,3 +1,4 @@
+use chrono::Timelike;
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
@@ -233,14 +234,14 @@ fn draw_main_content(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             let due_str = task
                 .due_at
                 .map(|dt| {
-                    let date = dt.format("%d/%m");
-                    let midnight = dt.naive_utc().date().and_hms_opt(0, 0, 0).unwrap();
-                    let midnight_dt: chrono::DateTime<chrono::Utc> =
-                        chrono::DateTime::from_naive_utc_and_offset(midnight, chrono::Utc);
-                    if dt != midnight_dt {
-                        format!("{} {}", date, dt.format("%H:%M"))
-                    } else {
+                    // Convert UTC to local time for display
+                    let local_dt = dt.with_timezone(&chrono::Local);
+                    let date = local_dt.format("%d/%m");
+                    let is_midnight = local_dt.hour() == 0 && local_dt.minute() == 0;
+                    if is_midnight {
                         date.to_string()
+                    } else {
+                        format!("{} {}", date, local_dt.format("%H:%M"))
                     }
                 })
                 .unwrap_or_default();

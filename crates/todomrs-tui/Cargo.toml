@@ -23,5 +23,6 @@ tokio = { version = "1.0", features = ["full"] }
 clap = { version = "4.0", features = ["derive"] }
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "chrono", "uuid", "migrate"] }
 libsqlite3-sys = { version = "0.27", features = ["bundled"] }
+notify-rust = "4.10"
 
 [dev-dependencies]

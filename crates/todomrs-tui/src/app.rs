@@ -5,6 +5,7 @@ use anyhow::Result;
 use chrono::{Datelike, NaiveTime, Timelike, Weekday};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use todomrs_core::domain::{AnchorMode, Priority, Project, RecurrenceRule, Task, TaskStatus};
+use crate::notifications;
 use todomrs_core::RecurrenceEngine;
 use todomrs_core::NaturalLanguageParser;
 use todomrs_store::{OperationStore, ProjectStore, RecurrenceRuleStore, TaskStore};
@@ -1092,6 +1093,11 @@ impl App {
         };
         self.status_message = Some(status_msg);
 
+        // Check notifications after successful sync
+        if let Err(e) = notifications::check_notifications(self.task_store.pool(), &self.tasks).await {
+            eprintln!("Notification check failed: {}", e);
+        }
+
         Ok(())
     }
 
@@ -1489,12 +1495,14 @@ pub fn format_recurrence_rule(rule: &RecurrenceRule) -> String {
 }
 
 /// Format a DateTime for natural-language editing (parser-friendly).
+/// Converts UTC to local time for display.
 fn format_datetime_for_edit(dt: chrono::DateTime<chrono::Utc>) -> String {
     use chrono::Duration;
 
-    let today = chrono::Utc::now().date_naive();
-    let date = dt.date_naive();
-    let time = dt.time();
+    let local_dt = dt.with_timezone(&chrono::Local);
+    let today = chrono::Local::now().date_naive();
+    let date = local_dt.date_naive();
+    let time = local_dt.time();
 
     let date_part = if date == today {
         "today".to_string()

@@ -2,6 +2,9 @@ import { getNextSeq, createOperation, getUnsyncedOperations, markOperationsSynce
 import { getSyncState, updateSyncState, initSyncState } from '$lib/db/sync-state';
 import { getMetadata, setMetadata } from '$lib/db/metadata';
 import { syncStore } from '$lib/stores/sync';
+import { tasksStore } from '$lib/stores/tasks';
+import { checkNotifications } from '$lib/notifications';
+import { get } from 'svelte/store';
 import type { OperationRecord } from '$lib/db/schema';
 
 // ── Supabase Client ──
@@ -355,6 +358,10 @@ async function syncRunner(): Promise<SyncResult> {
     });
 
     syncStore.set({ status: 'synced', lastSyncedAt: new Date().toISOString(), error: null });
+
+    // Check notifications after successful sync
+    const pendingTasks = get(tasksStore).filter(t => t.status === 'pending' && !t.deleted_at);
+    checkNotifications(pendingTasks).catch(() => {});
 
     return { uploaded: unsyncedOps.length, applied: appliedCount };
   } catch (err: any) {

@@ -116,6 +116,7 @@
         updates.priority = priority;
 
         await updateTaskField(task.id, updates);
+        dispatch('saved', { action: 'updated', title: trimmed });
       } else {
         // ── Create mode: add new task ──
         await addTask(trimmed, {

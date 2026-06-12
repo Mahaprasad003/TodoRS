@@ -16,6 +16,7 @@
   import { confirm, confirmStore, confirmResponse } from '$lib/stores/confirm';
   import { openSearch } from '$lib/stores/search';
   import { editingTask, closeEdit } from '$lib/stores/edit';
+  import { requestNotificationPermission } from '$lib/notifications';
   import '../app.css';
 
   let showAddModal = false;
@@ -36,6 +37,9 @@
 
   onMount(() => {
     initAuth();
+
+    // Request notification permission (prompts user once, never retries)
+    requestNotificationPermission();
 
     // Also sync when page regains focus (user switches back after editing in TUI)
     const handleVisibility = () => {

@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod notifications;
 mod ui;
 
 use anyhow::Result;

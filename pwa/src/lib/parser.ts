@@ -250,20 +250,26 @@ export function resolveTime(dueTime: string | null): string | null {
   return null;
 }
 
-/** Combine resolved date and time into an ISO datetime string (or null). */
+/** Combine resolved date and time into an ISO datetime string (or null).
+ *  Dates/times are interpreted as LOCAL and converted to UTC for storage. */
 export function resolveDatetime(dueDate: string | null, dueTime: string | null): string | null {
   const date = resolveDate(dueDate);
   const time = resolveTime(dueTime);
 
   if (date && time) {
-    return `${date}T${time}:00.000Z`;
+    const [y, m, d] = date.split('-').map(Number);
+    const [h, min] = time.split(':').map(Number);
+    return new Date(y, m - 1, d, h, min).toISOString();
   }
   if (date) {
-    return `${date}T00:00:00.000Z`;
+    const [y, m, d] = date.split('-').map(Number);
+    return new Date(y, m - 1, d).toISOString();
   }
   if (time) {
-    const today = toDateString(new Date());
-    return `${today}T${time}:00.000Z`;
+    const now = new Date();
+    const [h, min] = time.split(':').map(Number);
+    now.setHours(h, min, 0, 0);
+    return now.toISOString();
   }
   return null;
 }

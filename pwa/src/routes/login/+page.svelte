@@ -1,38 +1,28 @@
 <script lang="ts">
-  import { signIn, signUp } from '$lib/stores/auth';
+  import { signIn } from '$lib/stores/auth';
 
   let email = '';
   let password = '';
   let error = '';
   let loading = false;
-  let isSignUp = false;
 
   async function handleSubmit() {
     error = '';
     loading = true;
     try {
-      if (isSignUp) {
-        await signUp(email, password);
-      } else {
-        await signIn(email, password);
-      }
+      await signIn(email, password);
     } catch (e: any) {
       error = e.message || 'Authentication failed';
     } finally {
       loading = false;
     }
   }
-
-  function toggleMode() {
-    isSignUp = !isSignUp;
-    error = '';
-  }
 </script>
 
 <div class="auth-page">
   <div class="auth-card">
     <h1 class="auth-title">TodoRS</h1>
-    <p class="auth-subtitle">{isSignUp ? 'Create an account' : 'Sign in to your account'}</p>
+    <p class="auth-subtitle">Sign in to your account</p>
 
     <form class="auth-form" on:submit|preventDefault={handleSubmit}>
       <input
@@ -51,7 +41,6 @@
         placeholder="Password"
         aria-label="Password"
         required
-        minlength={6}
         disabled={loading}
       />
 
@@ -60,11 +49,7 @@
       {/if}
 
       <button type="submit" class="btn btn-primary" style="width: 100%; justify-content: center;" disabled={loading}>
-        {loading ? 'Please wait...' : isSignUp ? 'Create Account' : 'Sign In'}
-      </button>
-
-      <button type="button" class="btn btn-tertiary" style="width: 100%; justify-content: center;" on:click={toggleMode} disabled={loading}>
-        {isSignUp ? 'Already have an account? Sign in' : "Don't have an account? Sign up"}
+        {loading ? 'Please wait...' : 'Sign In'}
       </button>
     </form>
   </div>

@@ -1253,7 +1253,14 @@ impl App {
                         if let Some(d) = due_at { task.due_at = Some(*d); }
                         if let Some(d) = scheduled_at { task.scheduled_at = Some(*d); }
                         if let Some(r) = recurrence_rule_id { task.recurrence_rule_id = Some(*r); }
-                        if let Some(c) = completed_at { task.completed_at = Some(*c); }
+                        // Explicitly clear completed_at when the payload includes it as null
+                        // (PWA sends null when uncompleting) or when status is set to Pending
+                        // without a completed_at value (TUI omits None fields from JSON).
+                        if let Some(c) = completed_at {
+                            task.completed_at = Some(*c);
+                        } else if task.status == TaskStatus::Pending {
+                            task.completed_at = None;
+                        }
                         task.updated_at = op.created_at;
                         self.task_store.update(&task).await?;
                     }

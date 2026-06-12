@@ -151,7 +151,7 @@
 
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
   <div class="task-content" on:click={handleEdit} on:keydown={() => {}}>
-    <div class="task-title" class:completed={task.status === 'completed'}>{task.title}</div>
+    <div class="task-title" class:completed={task.status === 'completed'}>{task.title || '(untitled)'}</div>
     <div class="task-meta">
       {#if task.due_at}
         <span class="task-meta-item">

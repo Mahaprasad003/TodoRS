@@ -239,10 +239,14 @@ async function applyRemoteOperation(op: any): Promise<void> {
           case 'update': {
             const existing = await getTask(op.entity_id);
             if (existing) {
-              await updateTaskInDb({
-                id: op.entity_id,
-                ...p,
-              });
+              // When status changes to 'pending', explicitly clear completed_at
+              // because the TUI omits completed_at: None from the JSON payload
+              // (serde skips None fields), so the stale value would persist.
+              const updates: any = { id: op.entity_id, ...p };
+              if (p.status === 'pending' && existing.completed_at) {
+                updates.completed_at = null;
+              }
+              await updateTaskInDb(updates);
             } else {
               // Create if doesn't exist (race condition - remote created first)
               await createTask({

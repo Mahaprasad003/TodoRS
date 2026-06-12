@@ -178,29 +178,36 @@ export async function toggleTaskComplete(taskId: string): Promise<void> {
   const isCompleted = current?.status === 'completed';
   const newStatus = isCompleted ? 'pending' : 'completed';
 
+  // Build update payload — never pass undefined to IndexedDB
+  const updates: any = { id: taskId, status: newStatus, updated_at: now };
+  if (isCompleted) {
+    // Uncompleting: explicitly clear completed_at
+    updates.completed_at = null;
+  } else {
+    // Completing: set completed_at
+    updates.completed_at = now;
+  }
+
   // Optimistic update
   tasksStore.update(tasks =>
     tasks.map(t =>
       t.id === taskId
-        ? { ...t, status: newStatus, completed_at: isCompleted ? undefined : now, updated_at: now }
+        ? { ...t, ...updates }
         : t
     )
   );
 
-  // Update locally — MUST set both status and completed_at
-  await dbUpdateTask({
-    id: taskId,
-    status: newStatus,
-    completed_at: isCompleted ? undefined : now,
-    updated_at: now,
-  });
+  // Update locally
+  await dbUpdateTask(updates);
 
-  // Generate operation
-  await generateOperation('task', taskId, 'update', {
-    status: newStatus,
-    completed_at: isCompleted ? undefined : now,
-    updated_at: now,
-  });
+  // Generate operation — don't send undefined fields over JSON
+  const opPayload: Record<string, any> = { status: newStatus, updated_at: now };
+  if (isCompleted) {
+    opPayload.completed_at = null;
+  } else {
+    opPayload.completed_at = now;
+  }
+  await generateOperation('task', taskId, 'update', opPayload);
 
   // Trigger background sync
   sync().then(() => {

@@ -1,697 +1,549 @@
-# Phase 8: TUI Sync Client Integration — Implementation Plan
+# TodoRS Notification System
 
-## Overview
+## The Philosophy
 
-Integrate the Phase 7 `SyncClient` into the TUI so that every local mutation (task create/edit/complete/delete, project create/delete, recurrence changes) uploads to Supabase, and remote operations from other devices are downloaded and applied locally.
+Notifications should feel like a helpful assistant, not a nagging boss. The user should never see the same notification twice, and should never be annoyed. This is a personal app for one user — no configuration needed, no toggles, no settings screen. The app just does the right thing.
 
----
+## Three Notification Moments
 
-## Key Design Decisions
+We support exactly three notification moments. Each fires at most once per trigger. Once fired, it never fires again for the same state.
 
-### 1. Config Approach: `~/.config/todomrs/config.json`
+### 1. Morning Brief (First Sync of the Day)
 
-Use a JSON config file rather than `.env` (which is a dev-only artifact). On first run, create the file with placeholder values. The user fills in their Supabase URL, anon key, email, and password. This is portable, doesn't require a `dotenv` crate, and follows standard TUI app conventions.
+**Trigger:** The current date (local timezone) is different from `last_daily_notify` stored in metadata.
 
-```json
-{
-  "supabase_url": "https://sjtinieirxibsukjleta.supabase.co",
-  "supabase_api_key": "YOUR_ANON_KEY",
-  "email": "dev@todomrs.io",
-  "password": "password123"
-}
-```
+**What it notifies:** All pending tasks where `date(due_at) == today`.
 
-**New file:** `crates/todomrs-tui/src/config.rs`
+**Notification text:**
+- 1 task: `"Today: buy milk"`
+- 2-3 tasks: `"Today: buy milk, pay bills, call mom"`
+- 4+ tasks: `"Today: buy milk, pay bills, and 2 more"` (show first 2 + count)
+- 0 tasks: No notification (don't notify about an empty day)
 
-### 2. App Struct Changes
+**Once-ness:** Store `last_daily_notify = today` (YYYY-MM-DD string) in metadata. On next sync, `today == last_daily_notify` so the brief doesn't fire.
 
-Add three new fields to `App` — do **not** change the `App::new()` signature (keep it backward-compatible). Instead, add a `init_sync()` async method called from `main.rs` after construction.
+**Why not include overdue tasks from previous days?** The user already knows about them — they're sitting in the task list with a red indicator. The morning brief is a preview of what's coming today, not a rehash of what they've already ignored.
 
-```rust
-pub enum SyncStatus {
-    Disabled,       // No config / login failed
-    Syncing,
-    Synced,
-    Offline(String), // Error message
-}
-
-// New fields on App:
-pub sync_client: Option<SyncClient>,
-pub sync_status: SyncStatus,
-pub last_synced_seq: i64,
-```
-
-### 3. Sync Flow
-
-```
-sync() {
-    sync_status = Syncing
-    
-    // 1. Upload local unsynced operations
-    unsynced = op_store.get_unsynced(user_id)
-    if !unsynced.is_empty():
-        sync_client.upload_operations(unsynced.clone())
-        mark_synced(op_ids)
-    
-    // 2. Download remote operations (from other devices)
-    remote_ops = sync_client.get_operations(last_synced_seq)
-    for op in remote_ops:
-        if op.device_id != self.device_id:  // Skip our own ops
-            apply_remote_operation(op)
-        if op.seq > last_synced_seq:
-            last_synced_seq = op.seq
-    
-    // 3. Refresh UI
-    refresh_tasks()
-    sync_status = Synced
-}
-```
-
-### 4. Remote Operation Application
-
-Skip ops from our own device (`op.device_id == self.device_id`). For remote ops:
-
-| Operation | Local Action |
-|-----------|-------------|
-| Task Create | `task_store.create()` if not exists |
-| Task Update | `task_store.get_by_id()` → apply fields → `task_store.update()` |
-| Task Delete | `task_store.soft_delete()` |
-| Project Create | `project_store.create()` if not exists |
-| Project Update | `project_store.get_by_id()` → apply → `project_store.update()` |
-| RecurrenceRule Create | `recurrence_store.create()` if not exists |
-| RecurrenceRule Update | `recurrence_store.get()` → apply → `recurrence_store.update()` |
-| RecurrenceRule Delete | `recurrence_store.delete()` |
-| Delete (generic) | `task_store.soft_delete()` |
-
-**Idempotency:** All applies check existence before creating/updating. "Already exists" is not an error.
-
-### 5. SyncClient Enhancement
-
-The current `SyncClient` doesn't expose the `access_token` getter or an `is_authenticated()` check. Add:
-
-```rust
-pub fn is_authenticated(&self) -> bool {
-    self.access_token.is_some()
-}
-```
+**What if the user hasn't opened the app in 3 days?** On first sync of the new day, the morning brief fires for TODAY's tasks only. It does NOT fire briefs for the 2 missed days. One brief per day, max. The user sees today's slate, and the overdue detection (see below) handles any tasks that slipped.
 
 ---
 
-## Task Breakdown
+### 2. Task Becomes Due (Sync Catches the Exact Moment)
 
-### Task 1: Add `config.rs` module
+**Trigger:** The task has a **time component** in `due_at` (not midnight), AND `now >= due_at`, AND `now < due_at + 5 minutes`, AND the task's ID is not in `notified_tasks`.
 
-**File:** `crates/todomrs-tui/src/config.rs` (new)
+**Why the 5-minute window?** The sync runs every 30 seconds. A task due at 3:00:00pm might be caught at 3:00:00, 3:00:30, or 3:01:00. If the user opens the app at 3:02pm, the sync at 3:02:00 would catch it (3:02 < 3:05). If the user opens at 3:06pm, the 5-minute window has passed, and the task falls through to the overdue detection (moment #3) instead.
+
+**Notification text:** `"Time: buy milk"`
+
+**Once-ness:** Add `notified_tasks[task.id] = "due"` to metadata. On next sync, the task is in `notified_tasks` so it's skipped.
+
+**Why "Time:" and not "due"?** The word "Time" conveys urgency without being alarmist. It says "this is the moment you said it would be." It's a gentle nudge, not a command.
+
+---
+
+### 3. Task Becomes Overdue (First Sync That Sees It Overdue)
+
+**Trigger:** Two sub-cases:
+
+**Case A — Task has NO time component (midnight):**
+`date(due_at) < today` (the date has passed) AND the task's ID is not in `notified_tasks`.
+
+**Case B — Task HAS a time component, but the 5-minute "due" window was missed:**
+`now >= due_at + 5 minutes` AND the task's ID is not in `notified_tasks`.
+
+**Notification text:** `"buy milk is overdue"`
+
+**Once-ness:** Add `notified_tasks[task.id] = "overdue"` to metadata. On next sync, the task is in `notified_tasks` so it's skipped.
+
+**What about tasks that are 3 days overdue?** We notify ONCE when we first detect them as overdue. We do NOT re-notify every 30 seconds. The task just sits in the list with a red indicator. If the user completes it, it's gone. If they change the due date, it's a new state and the notification logic resets for that task.
+
+---
+
+## State Tracking
+
+All notification state lives in the existing `metadata` store (key-value in IndexedDB for PWA, SQLite for TUI).
+
+### Keys
+
+```
+last_daily_notify: "2026-06-13"          // YYYY-MM-DD of last morning brief
+notified_tasks: {                         // task ID → notification reason
+  "uuid-1": "due",
+  "uuid-2": "overdue",
+}
+```
+
+### Size
+
+The `notified_tasks` map grows over time. We need a cleanup strategy:
+
+- **On morning brief:** Remove entries older than 7 days (the task is either completed, or the user has had a week to deal with it and re-notifying won't help).
+- **On task completion:** Remove the entry from `notified_tasks` (the task is gone, no need to track it).
+
+This keeps the map bounded to ~30-50 entries max for a heavy user.
+
+---
+
+## The Exact Logic
+
+```
+function checkNotifications(pendingTasks):
+  if permission !== 'granted': return
+  
+  now = new Date()
+  today = localDate(now)  // YYYY-MM-DD
+  yesterday = today - 1 day
+  
+  // ── 1. Morning Brief ──
+  lastBrief = metadata.get("last_daily_notify")
+  if today != lastBrief:
+    todayTasks = pendingTasks.filter(t => date(t.due_at) == today)
+    if todayTasks.length > 0:
+      titles = todayTasks.slice(0, 2).map(t => t.title)
+      rest = todayTasks.length - titles.length
+      text = "Today: " + titles.join(", ")
+      if rest > 0:
+        text += rest == 1 ? " and 1 more" : ` and ${rest} more`
+      notify(text)
+    metadata.set("last_daily_notify", today)
+  
+  // ── 2 & 3. Task Due / Overdue ──
+  notified = metadata.get("notified_tasks") || {}
+  cleaned = {}  // for cleanup
+  
+  for task in pendingTasks:
+    if task.id in notified:
+      // Keep entry if less than 7 days old (cleanup)
+      // (We don't store timestamps, just the reason. Cleanup happens
+      //  by removing entries for completed/deleted tasks, which we
+      //  handle by rebuilding the map from current pending tasks.)
+      cleaned[task.id] = notified[task.id]
+      continue
+    
+    dueAt = new Date(task.due_at)
+    hasTime = dueAt is not midnight
+    
+    if hasTime:
+      // Task has a specific time
+      if now >= dueAt && now < dueAt + 5min:
+        // Moment #2: Task becomes due
+        notify("Time: " + task.title)
+        cleaned[task.id] = "due"
+      else if now >= dueAt + 5min:
+        // Moment #3: Task became overdue (missed the due window)
+        notify(task.title + " is overdue")
+        cleaned[task.id] = "overdue"
+      else:
+        // Task is not yet due, no notification
+        pass
+    else:
+      // Task has no specific time (midnight)
+      if date(dueAt) < today:
+        // Moment #3: Task is overdue
+        notify(task.title + " is overdue")
+        cleaned[task.id] = "overdue"
+      else:
+        // Task is due today but has no time — covered by morning brief
+        pass
+  
+  metadata.set("notified_tasks", cleaned)
+```
+
+### Cleanup Strategy
+
+Instead of storing timestamps for cleanup, we rebuild the `notified_tasks` map on each sync:
+
+1. Start with the existing `notified_tasks` map
+2. For each entry, check if the task still exists in `pendingTasks`
+3. If the task is no longer pending (completed, deleted, or due date changed), drop the entry
+4. Save the cleaned map
+
+This way, the map only ever contains entries for tasks that are still pending. Completed tasks are automatically cleaned up.
+
+---
+
+## PWA Implementation
+
+### Files
+
+| File | Changes | Lines |
+|------|---------|-------|
+| `pwa/src/lib/notifications.ts` | New file. Notification logic + IndexedDB helpers | ~100 |
+| `pwa/src/lib/sync/client.ts` | Call `checkNotifications()` after sync completes | ~5 |
+| `pwa/src/routes/+layout.svelte` | Request notification permission on mount | ~10 |
+
+### `pwa/src/lib/notifications.ts`
+
+```typescript
+import { getMetadata, setMetadata } from '$lib/db/metadata'
+
+const META_DAILY = 'last_daily_notify'
+const META_NOTIFIED = 'notified_tasks'
+
+export async function requestNotificationPermission(): Promise<boolean> {
+  if (!('Notification' in window)) return false
+  if (Notification.permission === 'granted') return true
+  if (Notification.permission === 'denied') return false
+  const result = await Notification.requestPermission()
+  return result === 'granted'
+}
+
+export async function checkNotifications(pendingTasks: TaskRecord[]): Promise<void> {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return
+
+  const now = new Date()
+  const today = localDate(now)
+
+  // 1. Morning brief
+  const lastBrief = await getMetadata(META_DAILY)
+  if (today !== lastBrief) {
+    const todayTasks = pendingTasks.filter(t => t.due_at && localDate(new Date(t.due_at)) === today)
+    if (todayTasks.length > 0) {
+      const titles = todayTasks.slice(0, 2).map(t => t.title)
+      const rest = todayTasks.length - titles.length
+      let text = 'Today: ' + titles.join(', ')
+      if (rest === 1) text += ' and 1 more'
+      else if (rest > 1) text += ` and ${rest} more`
+      sendNotification(text)
+    }
+    await setMetadata(META_DAILY, today)
+  }
+
+  // 2 & 3. Task due / overdue
+  const notified: Record<string, string> = JSON.parse(await getMetadata(META_NOTIFIED) || '{}')
+  const cleaned: Record<string, string> = {}
+
+  for (const task of pendingTasks) {
+    // Cleanup: keep only entries for still-pending tasks
+    if (task.id in notified) {
+      cleaned[task.id] = notified[task.id]
+      continue
+    }
+
+    if (!task.due_at) continue
+    const dueAt = new Date(task.due_at)
+    const hasTime = dueAt.getUTCHours() !== 0 || dueAt.getUTCMinutes() !== 0
+
+    if (hasTime) {
+      const fiveMinAfter = new Date(dueAt.getTime() + 5 * 60 * 1000)
+      if (now >= dueAt && now < fiveMinAfter) {
+        // Moment 2: Task becomes due
+        sendNotification('Time: ' + task.title)
+        cleaned[task.id] = 'due'
+      } else if (now >= fiveMinAfter) {
+        // Moment 3: Task overdue (missed due window)
+        sendNotification(task.title + ' is overdue')
+        cleaned[task.id] = 'overdue'
+      }
+    } else {
+      // No time component — check if date has passed
+      if (localDate(dueAt) < today) {
+        sendNotification(task.title + ' is overdue')
+        cleaned[task.id] = 'overdue'
+      }
+    }
+  }
+
+  await setMetadata(META_NOTIFIED, JSON.stringify(cleaned))
+}
+
+function sendNotification(body: string): void {
+  new Notification('TodoRS', {
+    body,
+    icon: '/icon-192.png',
+    badge: '/icon-192.png',
+    tag: 'todors-' + Date.now(),  // unique tag prevents stacking
+  })
+}
+
+function localDate(d: Date): string {
+  return d.toLocaleDateString('en-CA')  // YYYY-MM-DD in local timezone
+}
+```
+
+### Integration in `sync/client.ts`
+
+After the sync completes successfully (inside the `try` block, after updating sync state), call:
+
+```typescript
+import { checkNotifications } from '$lib/notifications'
+import { tasksStore } from '$lib/stores/tasks'
+
+// ... after sync state update ...
+const pending = get(tasksStore).filter(t => t.status === 'pending' && !t.deleted_at)
+await checkNotifications(pending)
+```
+
+### Permission Request in `+layout.svelte`
+
+In the `onMount` block, after `initAuth()`:
+
+```typescript
+import { requestNotificationPermission } from '$lib/notifications'
+
+// In onMount:
+requestNotificationPermission()
+```
+
+This will prompt the user for notification permission the first time they load the app. If they deny, notifications just won't work (no error, no retry). If they grant, they'll get notifications from then on.
+
+---
+
+## TUI Implementation
+
+### Files
+
+| File | Changes | Lines |
+|------|---------|-------|
+| `crates/todomrs-tui/src/notifications.rs` | New file. Notification logic + SQLite helpers | ~80 |
+| `crates/todomrs-tui/src/app.rs` | Call `check_notifications()` after sync | ~5 |
+| `crates/todomrs-tui/src/main.rs` | Add `notify-rust` dependency | — |
+| `crates/todomrs-tui/Cargo.toml` | Add `notify-rust` | 1 |
+
+### Approach
+
+The TUI uses the same logic as the PWA but with two differences:
+
+1. **Notification delivery:** Instead of `new Notification()`, we use `notify-rust` for native desktop notifications:
+   ```rust
+   Notification::new()
+       .summary("TodoRS")
+       .body(&text)
+       .show()
+   ```
+
+2. **State storage:** Instead of IndexedDB metadata, we use SQLite. The `metadata` table already exists (key-value store). We use the same keys: `last_daily_notify` and `notified_tasks`.
+
+### `crates/todomrs-tui/src/notifications.rs`
 
 ```rust
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use chrono::{Local, Utc};
+use notify_rust::Notification;
+use sqlx::SqlitePool;
+use std::collections::HashMap;
+use todomrs_core::domain::{Task, TaskStatus};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Config {
-    pub supabase_url: String,
-    pub supabase_api_key: String,
-    pub email: String,
-    pub password: String,
-}
+pub async fn check_notifications(pool: &SqlitePool, tasks: &[Task]) -> Result<()> {
+    let pending: Vec<&Task> = tasks.iter()
+        .filter(|t| t.status == TaskStatus::Pending && t.deleted_at.is_none())
+        .collect();
 
-impl Config {
-    /// Load config from ~/.config/todomrs/config.json.
-    /// Creates the file with placeholder values if it doesn't exist.
-    pub fn load() -> Result<Self> {
-        let path = Self::config_path();
-        if path.exists() {
-            let content = std::fs::read_to_string(&path)?;
-            let config: Config = serde_json::from_str(&content)?;
-            Ok(config)
+    let now = Utc::now();
+    let today = Local::now().format("%Y-%m-%d").to_string();
+
+    // 1. Morning brief
+    let last_brief = get_metadata(pool, "last_daily_notify").await?;
+    if last_brief.as_deref() != Some(&today) {
+        let today_tasks: Vec<&Task> = pending.iter()
+            .filter(|t| t.due_at.map(|d| d.with_timezone(&Local).format("%Y-%m-%d").to_string()) == Some(today.clone()))
+            .copied()
+            .collect();
+        
+        if !today_tasks.is_empty() {
+            let titles: Vec<&str> = today_tasks.iter().take(2).map(|t| t.title.as_str()).collect();
+            let rest = today_tasks.len() - titles.len();
+            let mut text = format!("Today: {}", titles.join(", "));
+            if rest == 1 { text.push_str(" and 1 more"); }
+            else if rest > 1 { text.push_str(&format!(" and {} more", rest)); }
+            send_notification(&text)?;
+        }
+        set_metadata(pool, "last_daily_notify", &today).await?;
+    }
+
+    // 2 & 3. Task due / overdue
+    let notified_json = get_metadata(pool, "notified_tasks").await?;
+    let notified: HashMap<String, String> = notified_json
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let mut cleaned: HashMap<String, String> = HashMap::new();
+
+    for task in &pending {
+        if notified.contains_key(&task.id.to_string()) {
+            cleaned.insert(task.id.to_string(), notified[&task.id.to_string()].clone());
+            continue;
+        }
+
+        let due_at = match task.due_at {
+            Some(d) => d,
+            None => continue,
+        };
+
+        let local_due = due_at.with_timezone(&Local);
+        let is_midnight = local_due.hour() == 0 && local_due.minute() == 0;
+
+        if !is_midnight {
+            let five_min_later = due_at + chrono::Duration::minutes(5);
+            if now >= due_at && now < five_min_later {
+                send_notification(&format!("Time: {}", task.title))?;
+                cleaned.insert(task.id.to_string(), "due".to_string());
+            } else if now >= five_min_later {
+                send_notification(&format!("{} is overdue", task.title))?;
+                cleaned.insert(task.id.to_string(), "overdue".to_string());
+            }
         } else {
-            let config = Config {
-                supabase_url: "https://YOUR_PROJECT.supabase.co".to_string(),
-                supabase_api_key: "YOUR_ANON_KEY".to_string(),
-                email: "".to_string(),
-                password: "".to_string(),
-            };
-            config.save()?;
-            Ok(config)
-        }
-    }
-
-    pub fn save(&self) -> Result<()> {
-        let path = Self::config_path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&path, serde_json::to_string_pretty(self)?)?;
-        Ok(())
-    }
-
-    fn config_path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home)
-            .join(".config")
-            .join("todomrs")
-            .join("config.json")
-    }
-
-    /// Check if config has real credentials (not placeholders).
-    pub fn is_configured(&self) -> bool {
-        !self.supabase_url.contains("YOUR_PROJECT")
-            && !self.supabase_api_key.contains("YOUR_ANON_KEY")
-            && !self.email.is_empty()
-            && !self.password.is_empty()
-    }
-}
-```
-
-**File:** `crates/todomrs-tui/src/main.rs` — add `mod config;`
-
-**Acceptance:** `cargo build` passes. Config file created at `~/.config/todomrs/config.json` on first run.
-
----
-
-### Task 2: Add SyncClient `is_authenticated()` method
-
-**File:** `crates/todomrs-sync/src/client.rs`
-
-Add one method to `SyncClient`:
-
-```rust
-pub fn is_authenticated(&self) -> bool {
-    self.access_token.is_some()
-}
-```
-
-**Acceptance:** `cargo build` passes.
-
----
-
-### Task 3: Add sync fields to App struct
-
-**File:** `crates/todomrs-tui/src/app.rs`
-
-Add `SyncStatus` enum and new fields:
-
-```rust
-use todomrs_sync::SyncClient;
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum SyncStatus {
-    Disabled,
-    Syncing,
-    Synced,
-    Offline(String),
-}
-
-// Add to App struct (after recurrence_rules field):
-pub sync_client: Option<SyncClient>,
-pub sync_status: SyncStatus,
-pub last_synced_seq: i64,
-```
-
-Initialize in `App::new()`:
-
-```rust
-sync_client: None,
-sync_status: SyncStatus::Disabled,
-last_synced_seq: 0,
-```
-
-Add `init_sync_client()` method:
-
-```rust
-pub fn set_sync_client(&mut self, client: SyncClient) {
-    self.sync_client = Some(client);
-}
-```
-
-**Acceptance:** `cargo build` passes. No behavioral change yet.
-
----
-
-### Task 4: Implement `sync()` and `apply_remote_operation()` methods
-
-**File:** `crates/todomrs-tui/src/app.rs`
-
-Add two methods to `impl App`:
-
-```rust
-/// Perform a full sync cycle: upload local ops, download remote ops, apply them.
-pub async fn sync(&mut self) -> Result<()> {
-    let client = match &self.sync_client {
-        Some(c) if c.is_authenticated() => c,
-        _ => {
-            self.sync_status = SyncStatus::Disabled;
-            return Ok(());
-        }
-    };
-
-    self.sync_status = SyncStatus::Syncing;
-
-    // 1. Upload local unsynced operations
-    match self.op_store.get_unsynced(self.user_id).await {
-        Ok(unsynced) if !unsynced.is_empty() => {
-            if let Err(e) = client.upload_operations(unsynced.clone()).await {
-                self.sync_status = SyncStatus::Offline(format!("Upload failed: {}", e));
-                return Ok(());
-            }
-            let op_ids: Vec<Uuid> = unsynced.iter().map(|op| op.op_id).collect();
-            self.op_store.mark_synced(&op_ids).await?;
-        }
-        Ok(_) => {} // Nothing to upload
-        Err(e) => {
-            self.sync_status = SyncStatus::Offline(format!("DB error: {}", e));
-            return Ok(());
-        }
-    }
-
-    // 2. Download remote operations
-    let remote_ops = match client.get_operations(self.last_synced_seq).await {
-        Ok(ops) => ops,
-        Err(e) => {
-            self.sync_status = SyncStatus::Offline(format!("Download failed: {}", e));
-            return Ok(());
-        }
-    };
-
-    // 3. Apply remote operations (skip our own)
-    for op in &remote_ops {
-        if op.device_id != self.device_id {
-            if let Err(e) = self.apply_remote_operation(op).await {
-                // Log but don't fail — skip problematic ops
-                eprintln!("Failed to apply remote op {:?}: {}", op.op_id, e);
+            let due_date = local_due.format("%Y-%m-%d").to_string();
+            if due_date < today {
+                send_notification(&format!("{} is overdue", task.title))?;
+                cleaned.insert(task.id.to_string(), "overdue".to_string());
             }
         }
-        if op.seq > self.last_synced_seq {
-            self.last_synced_seq = op.seq;
-        }
     }
 
-    // 4. Refresh UI
-    self.refresh_tasks().await?;
-
-    if remote_ops.is_empty() {
-        self.sync_status = SyncStatus::Synced;
-    } else {
-        let applied = remote_ops.iter().filter(|op| op.device_id != self.device_id).count();
-        self.sync_status = SyncStatus::Synced;
-        self.status_message = Some(format!("Synced ({} remote ops)", applied));
-    }
+    let cleaned_json = serde_json::to_string(&cleaned)?;
+    set_metadata(pool, "notified_tasks", &cleaned_json).await?;
 
     Ok(())
 }
 
-/// Apply a single remote operation to the local database.
-async fn apply_remote_operation(&mut self, op: &Operation) -> Result<()> {
-    use todomrs_sync::operations::{Entity, OperationPayload, OperationType};
-
-    match (&op.entity, &op.op_type) {
-        // ── Task Create ───────────────────────────────────────────
-        (Entity::Task, OperationType::Create) => {
-            if let OperationPayload::TaskCreate {
-                title, description, status, project_id, tag_ids,
-                priority, due_at, scheduled_at, recurrence_rule_id,
-            } = &op.payload {
-                // Skip if already exists (idempotent)
-                if self.task_store.get_by_id(op.entity_id).await?.is_some() {
-                    return Ok(());
-                }
-                let mut task = Task::new(self.user_id, title.clone());
-                task.id = op.entity_id;
-                task.description = description.clone();
-                task.status = status.clone();
-                task.project_id = *project_id;
-                task.tag_ids = tag_ids.clone();
-                task.priority = priority.clone();
-                task.due_at = *due_at;
-                task.scheduled_at = *scheduled_at;
-                task.recurrence_rule_id = *recurrence_rule_id;
-                task.created_at = op.created_at;
-                task.updated_at = op.created_at;
-                self.task_store.create(&task).await?;
-            }
-        }
-
-        // ── Task Update ───────────────────────────────────────────
-        (Entity::Task, OperationType::Update) => {
-            if let Some(mut task) = self.task_store.get_by_id(op.entity_id).await? {
-                if let OperationPayload::TaskUpdate {
-                    title, description, status, project_id, tag_ids,
-                    priority, due_at, scheduled_at, recurrence_rule_id,
-                    completed_at,
-                } = &op.payload {
-                    if let Some(t) = title { task.title = t.clone(); }
-                    if let Some(d) = description { task.description = Some(d.clone()); }
-                    if let Some(s) = status { task.status = s.clone(); }
-                    if let Some(p) = project_id { task.project_id = Some(*p); }
-                    if let Some(t) = tag_ids { task.tag_ids = t.clone(); }
-                    if let Some(p) = priority { task.priority = p.clone(); }
-                    if let Some(d) = due_at { task.due_at = Some(*d); }
-                    if let Some(d) = scheduled_at { task.scheduled_at = Some(*d); }
-                    if let Some(r) = recurrence_rule_id { task.recurrence_rule_id = Some(*r); }
-                    if let Some(c) = completed_at { task.completed_at = Some(*c); }
-                    task.updated_at = op.created_at;
-                    self.task_store.update(&task).await?;
-                }
-            }
-            // If task doesn't exist locally, skip (may have been deleted)
-        }
-
-        // ── Task Delete ───────────────────────────────────────────
-        (Entity::Task, OperationType::Delete) => {
-            self.task_store.soft_delete(op.entity_id).await?;
-        }
-
-        // ── Project Create ────────────────────────────────────────
-        (Entity::Project, OperationType::Create) => {
-            if let OperationPayload::ProjectCreate { name, color, sort_order } = &op.payload {
-                if self.project_store.get_by_id(op.entity_id).await?.is_some() {
-                    return Ok(());
-                }
-                let now = chrono::Utc::now();
-                let project = Project {
-                    id: op.entity_id,
-                    user_id: self.user_id,
-                    name: name.clone(),
-                    color: color.clone(),
-                    sort_order: *sort_order,
-                    created_at: op.created_at,
-                    updated_at: op.created_at,
-                    archived_at: None,
-                };
-                self.project_store.create(&project).await?;
-            }
-        }
-
-        // ── Project Update ────────────────────────────────────────
-        (Entity::Project, OperationType::Update) => {
-            if let Some(mut project) = self.project_store.get_by_id(op.entity_id).await? {
-                if let OperationPayload::ProjectUpdate { name, color, sort_order, archived_at } = &op.payload {
-                    if let Some(n) = name { project.name = n.clone(); }
-                    if let Some(c) = color { project.color = Some(c.clone()); }
-                    if let Some(s) = sort_order { project.sort_order = *s; }
-                    if let Some(a) = archived_at { project.archived_at = Some(*a); }
-                    project.updated_at = op.created_at;
-                    self.project_store.update(&project).await?;
-                }
-            }
-        }
-
-        // ── RecurrenceRule Create ─────────────────────────────────
-        (Entity::RecurrenceRule, OperationType::Create) => {
-            if let OperationPayload::RecurrenceRuleCreate {
-                task_id, kind, interval, timezone,
-                wait_for_completion, anchor_mode,
-            } = &op.payload {
-                if self.recurrence_store.get(op.entity_id).await?.is_some() {
-                    return Ok(());
-                }
-                let rule = todomrs_core::domain::RecurrenceRule {
-                    id: op.entity_id,
-                    task_id: *task_id,
-                    kind: deserialize_recurrence_kind(kind),
-                    interval: *interval,
-                    by_weekday: None,
-                    by_monthday: None,
-                    timezone: timezone.clone(),
-                    wait_for_completion: *wait_for_completion,
-                    anchor_mode: deserialize_anchor_mode(anchor_mode),
-                    created_at: op.created_at,
-                    updated_at: op.created_at,
-                };
-                self.recurrence_store.create(&rule).await?;
-            }
-        }
-
-        // ── RecurrenceRule Update ─────────────────────────────────
-        (Entity::RecurrenceRule, OperationType::Update) => {
-            if let Some(mut rule) = self.recurrence_store.get(op.entity_id).await? {
-                if let OperationPayload::RecurrenceRuleUpdate {
-                    interval, wait_for_completion, anchor_mode,
-                } = &op.payload {
-                    if let Some(i) = interval { rule.interval = *i; }
-                    if let Some(w) = wait_for_completion { rule.wait_for_completion = *w; }
-                    if let Some(a) = anchor_mode { rule.anchor_mode = deserialize_anchor_mode(a); }
-                    rule.updated_at = op.created_at;
-                    self.recurrence_store.update(&rule).await?;
-                }
-            }
-        }
-
-        // ── RecurrenceRule Delete ─────────────────────────────────
-        (Entity::RecurrenceRule, OperationType::Delete) => {
-            self.recurrence_store.delete(op.entity_id).await?;
-        }
-
-        // ── Generic Delete (fallback) ─────────────────────────────
-        (_, OperationType::Delete) => {
-            // Best-effort: try soft-delete as task
-            self.task_store.soft_delete(op.entity_id).await.ok();
-        }
-
-        _ => {} // Tag operations, reminders — skip for now
-    }
-
+fn send_notification(body: &str) -> Result<()> {
+    Notification::new()
+        .summary("TodoRS")
+        .body(body)
+        .show()?;
     Ok(())
 }
 
-// ── Helper deserializers ─────────────────────────────────────────────
-
-fn deserialize_recurrence_kind(s: &str) -> todomrs_core::domain::RecurrenceKind {
-    match s.to_lowercase().as_str() {
-        "daily" => todomrs_core::domain::RecurrenceKind::Daily,
-        "weekly" => todomrs_core::domain::RecurrenceKind::Weekly,
-        "monthly" => todomrs_core::domain::RecurrenceKind::Monthly,
-        "yearly" => todomrs_core::domain::RecurrenceKind::Yearly,
-        _ => todomrs_core::domain::RecurrenceKind::Daily,
-    }
+// Metadata helpers (reuse existing metadata table)
+async fn get_metadata(pool: &SqlitePool, key: &str) -> Result<Option<String>> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT value FROM metadata WHERE key = ?"
+    )
+    .bind(key)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| r.0))
 }
 
-fn deserialize_anchor_mode(s: &str) -> todomrs_core::domain::AnchorMode {
-    match s.to_lowercase().as_str() {
-        "completion" => todomrs_core::domain::AnchorMode::Completion,
-        _ => todomrs_core::domain::AnchorMode::Schedule,
-    }
+async fn set_metadata(pool: &SqlitePool, key: &str, value: &str) -> Result<()> {
+    sqlx::query("INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)")
+        .bind(key)
+        .bind(value)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 ```
 
-**Acceptance:** `cargo build` passes. Methods exist but are not yet called.
+### Integration in `app.rs`
 
----
-
-### Task 5: Wire sync into `main.rs`
-
-**File:** `crates/todomrs-tui/src/main.rs`
-
-Changes:
-1. Add `mod config;`
-2. Load config before terminal setup
-3. Create SyncClient and login (before terminal enters raw mode — so errors are visible)
-4. Pass sync_client to App
-5. Call `app.sync()` for initial sync after `refresh_tasks()`
-6. Print config path if sync is disabled
+In the `sync()` method, after the sync state is updated and before the status message is set:
 
 ```rust
-mod app;
-mod ui;
-mod config;
-
-// In run_async(), BEFORE terminal setup:
-let config = config::Config::load()?;
-
-// Create sync client
-let sync_client = if config.is_configured() {
-    let mut client = todomrs_sync::SyncClient::new(
-        config.supabase_url.clone(),
-        config.supabase_api_key.clone(),
-    );
-    match client.login(&config.email, &config.password).await {
-        Ok(_) => Some(client),
-        Err(e) => {
-            eprintln!("Sync login failed: {}", e);
-            None
-        }
-    }
-} else {
-    eprintln!("Sync not configured. Edit: {}", config::Config::config_path().display());
-    None
-};
-
-// After App::new():
-if let Some(client) = sync_client {
-    app.set_sync_client(client);
-}
-
-// After app.refresh_tasks():
-if app.sync_client.is_some() {
-    app.sync().await?;
+// Check notifications
+if let Err(e) = notifications::check_notifications(self.task_store.pool(), &self.tasks).await {
+    eprintln!("Notification check failed: {}", e);
 }
 ```
 
-**Important:** Make `config_path()` public on Config so the error message can show the path.
+---
 
-**Acceptance:** `cargo build` passes. On first run, config file is created. With valid credentials, initial sync runs.
+## What We Chose Not To Do (and Why)
+
+### No "snooze" or "dismiss" action
+The user can complete or reschedule the task. That's the natural way to make a notification go away. Adding snooze buttons adds complexity without proportional value for a personal app.
+
+### No notification preferences
+No "quiet hours," no "only notify for high priority," no toggles. The three moments we chose are the right moments. If the user wants to change the behavior, they edit the code.
+
+### No re-notification for overdue tasks
+Once we say "buy milk is overdue," we don't say it again. The task stays in the list. If the user wants to be reminded, they reschedule it (which creates a new due date and a new notification opportunity).
+
+### No notification for tasks due today (without time)
+Tasks due today without a specific time are covered by the morning brief. We don't individually notify "buy milk is due" for these — that would be redundant with the brief.
+
+### No badge count or app icon changes
+We don't modify the PWA's app icon or add badge numbers. The notification itself is the alert. Adding badges adds complexity and is platform-dependent.
 
 ---
 
-### Task 6: Add 'S' key binding for manual sync
+## Edge Cases
 
-**File:** `crates/todomrs-tui/src/app.rs`
+### User opens app for the first time after 3 days
+- Morning brief fires for TODAY's tasks only (not the 2 missed days)
+- Overdue detection fires for each task that became overdue while the app was closed
+- Total notifications: 1 morning brief + N overdue notifications (one per overdue task)
+- This is not spam — it's a catch-up. The user gets one message per overdue task, not repeated messages.
 
-In `handle_event()`, in the `InputMode::Normal` match block, add:
+### User completes a task that was notified as overdue
+- The task is no longer pending
+- On next sync, the cleanup removes it from `notified_tasks`
+- No further notifications for that task
 
-```rust
-KeyCode::Char('S') if key.modifiers.is_empty() => {
-    self.sync().await?;
+### User changes a task's due date
+- The task's ID is still in `notified_tasks` with the old reason
+- But the due date check will fail (the new due date is in the future)
+- When the new due date arrives, the notification fires again
+- Wait — the task is still in `notified_tasks`! We need to handle this.
+- Fix: In the cleanup step, if a task's due date has changed since the notification was sent, remove it from `notified_tasks`. We'd need to store the due date alongside the notification reason.
+- Simpler fix: Don't store the reason, just store the due_at that was notified. If the task's current due_at differs from the stored one, the notification is stale and we remove it.
+
+Let me update the state tracking:
+
+```
+notified_tasks: {
+  "uuid-1": "2026-06-13T15:00:00.000Z",  // the due_at we notified about
+  "uuid-2": "2026-06-12T00:00:00.000Z",
 }
 ```
 
-Add it after the existing `KeyCode::Char('C')` handler.
-
-**Acceptance:** Pressing 'S' in Normal mode triggers sync.
-
----
-
-### Task 7: Update UI — sync status indicator
-
-**File:** `crates/todomrs-tui/src/ui.rs`
-
-#### 7a. Status bar — add sync indicator
-
-After the view name span and project filter indicator, add a sync status span:
-
-```rust
-// In draw_status_bar(), after the [P] indicator span:
-if let Some(ref _client) = app.sync_client {
-    // Show sync status
-    let (sync_text, sync_color) = match &app.sync_status {
-        SyncStatus::Disabled => ("○", Color::DarkGray),
-        SyncStatus::Syncing => ("↻", Color::Yellow),
-        SyncStatus::Synced => ("✓", Color::Green),
-        SyncStatus::Offline(_) => ("✗", Color::Red),
-    };
-    status_spans.push(Span::styled(
-        format!(" {} ", sync_text),
-        Style::default().fg(sync_color),
-    ));
-}
+In the cleanup:
+```
+for (taskId, notifiedDueAt) in notified_tasks:
+  task = pendingTasks.find(t => t.id == taskId)
+  if !task:
+    // Task is gone (completed/deleted), drop entry
+    continue
+  if task.due_at != notifiedDueAt:
+    // Due date changed, notification is stale, drop entry
+    // The new due date will trigger a new notification when it arrives
+    continue
+  // Task still pending with same due date, keep entry
+  cleaned[taskId] = notifiedDueAt
 ```
 
-Also add 'S' shortcut to the status bar (after the Search shortcut):
+This is cleaner and handles the reschedule case naturally.
 
-```rust
-Span::styled("S", Style::default().fg(Color::Yellow)),
-Span::raw(" Sync "),
-```
+### Multiple tasks become overdue at the same time
+- Each gets its own notification: "buy milk is overdue", "pay bills is overdue"
+- We don't batch overdue notifications (too complex, and each task deserves its own call to action)
+- The browser may group them visually, which is fine
 
-#### 7b. Help text — add sync section
-
-Add after "Search & Help:" section:
-
-```rust
-Line::from(""),
-Line::from("Sync:"),
-Line::from("  S      — Sync now"),
-Line::from("  ✓ = synced  ↻ = syncing  ✗ = offline  ○ = disabled"),
-```
-
-**Acceptance:** Status bar shows sync indicator. Help text includes sync shortcuts.
+### Notification permission denied
+- `checkNotifications()` returns early without error
+- No fallback, no retry, no error message
+- The user can re-enable in browser settings if they change their mind
 
 ---
 
-### Task 8: Handle `recurrence_store.get()` — check if it exists
+## Testing
 
-**File:** `crates/todomrs-store/src/recurrence_store.rs`
+### PWA
+1. Open PWA, grant notification permission
+2. Create a task due "tomorrow 3pm"
+3. Wait until 3pm (or mock the time)
+4. Verify notification: "Time: [title]"
+5. Wait 30 seconds, verify no duplicate notification
+6. Create a task due "yesterday"
+7. Verify notification: "[title] is overdue"
+8. Reload page (new day), verify morning brief includes today's tasks
+9. Complete a notified task, verify it's removed from `notified_tasks`
+10. Change a task's due date, verify new notification fires at new time
 
-Check if `recurrence_store` has a `get(id)` method. If not, add:
-
-```rust
-pub async fn get(&self, id: Uuid) -> Result<Option<RecurrenceRule>> {
-    // SELECT * FROM recurrence_rules WHERE id = ?
-}
-```
-
-**Acceptance:** `cargo build` passes.
-
----
-
-### Task 9: Add `last_synced_seq` persistence
-
-The `last_synced_seq` is currently in-memory only. On restart, it resets to 0, which means we'd re-download all operations. This is fine for now (idempotent apply skips duplicates), but for efficiency, persist it.
-
-**Approach for Phase 8:** Keep it in-memory. The operation application is idempotent, so re-downloading is safe. Optimize in a later phase by storing `last_synced_seq` in the `sync_state` SQLite table.
-
-**No changes needed for this task — document as future optimization.**
+### TUI
+1. Launch TUI, verify notification permission works (notify-rust doesn't need permission on Linux)
+2. Same test cases as PWA
+3. Verify notifications appear as native desktop notifications
 
 ---
 
-## Files Modified (Summary)
+## Summary
 
-| File | Changes |
-|------|---------|
-| `crates/todomrs-tui/src/config.rs` | **NEW** — Config struct, load/save from `~/.config/todomrs/config.json` |
-| `crates/todomrs-tui/src/main.rs` | Add `mod config`, load config, init SyncClient, login, initial sync |
-| `crates/todomrs-tui/src/app.rs` | Add `SyncStatus` enum, `sync_client`/`sync_status`/`last_synced_seq` fields, `set_sync_client()`, `sync()`, `apply_remote_operation()`, 'S' key binding, helper deserializers |
-| `crates/todomrs-tui/src/ui.rs` | Add sync indicator to status bar, add 'S Sync' shortcut, add sync section to help |
-| `crates/todomrs-sync/src/client.rs` | Add `is_authenticated()` method |
-| `crates/todomrs-store/src/recurrence_store.rs` | Add `get(id)` method if missing |
+| Moment | Trigger | Text | Once-ness |
+|--------|---------|------|-----------|
+| Morning brief | First sync of new day | "Today: task1, task2" | `last_daily_notify` date |
+| Task becomes due | Sync catches `now >= due_at` within 5min | "Time: title" | `notified_tasks[id]` |
+| Task becomes overdue | Date passed or 5min window missed | "title is overdue" | `notified_tasks[id]` |
 
-## Files NOT Modified
-
-- `crates/todomrs-sync/src/operations.rs` — no changes needed
-- `crates/todomrs-sync/src/snapshot.rs` — no changes needed
-- `crates/todomrs-core/*` — no changes needed
-- `Cargo.toml` (workspace) — no new deps needed
-- `crates/todomrs-tui/Cargo.toml` — no new deps needed (serde/serde_json already there)
-
----
-
-## Testing Plan
-
-### Unit Tests
-- Config: test `load()` creates file, `save()` writes, `is_configured()` checks placeholders
-- SyncClient: `is_authenticated()` returns false before login, true after
-
-### Integration Tests (manual)
-1. **First run without config:** App starts, shows "○" sync indicator, prints config path
-2. **Configure and restart:** App starts, logs in, runs initial sync, shows "✓"
-3. **Create task on device A, sync, create task on device B, sync:** Both tasks appear on both devices
-4. **Network failure:** Sync shows "✗" with error, app doesn't crash
-5. **Idempotent sync:** Sync twice in a row — no duplicate tasks
-
-### Verification Commands
-```bash
-# Build
-cargo build --bin todomrs
-
-# Run
-cargo run --bin todomrs
-
-# Check config was created
-cat ~/.config/todomrs/config.json
-```
-
----
-
-## Risks and Mitigations
-
-| Risk | Mitigation |
-|------|-----------|
-| SyncClient `Operation` deserialization from server JSON may differ from local format | Server stores same JSON structure — verified in Phase 7 e2e test |
-| Remote ops may reference entities that don't exist locally (e.g., Task Update for unknown task) | Idempotent apply: skip if entity not found |
-| Sequence numbers are per-device — `last_synced_seq` tracking needs care | Track max seq across all downloaded ops, not just from one device |
-| Config file permissions | `~/.config/todomrs/` is user-owned, not world-readable by default |
-| SyncClient is not Clone — can't easily share between threads | Only used from main async task — no concurrency issue |
-
----
-
-## Implementation Order
-
-1. Task 2 (SyncClient `is_authenticated`) — trivial, unblocks everything
-2. Task 8 (recurrence_store.get) — check if exists, add if needed
-3. Task 1 (config.rs) — standalone, no deps
-4. Task 3 (App sync fields) — adds fields, no behavior change
-5. Task 4 (sync + apply methods) — core logic
-6. Task 5 (main.rs wiring) — connects everything
-7. Task 6 ('S' key binding) — one line
-8. Task 7 (UI changes) — status bar + help text
+Total: ~80 lines PWA, ~80 lines TUI, ~5 lines integration each. No infrastructure. No configuration. Just a helpful assistant that does the right thing.

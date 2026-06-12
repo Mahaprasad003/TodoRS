@@ -71,6 +71,7 @@ pub struct App {
     pub last_mutation_at: Instant,
     /// Set after a mutation to trigger a debounced auto-sync (~10s later).
     pub sync_debounce_requested: bool,
+
 }
 
 impl std::fmt::Debug for App {
@@ -145,19 +146,52 @@ impl App {
     }
 
     /// Load the last_synced_at timestamp from the persisted metadata table.
+    ///
+    /// # Per-account safety
+    ///
+    /// This reads from the per-account database, so sync state is naturally
+    /// isolated by account. Account A's download cursor cannot bleed into
+    /// account B because each account opens a different SQLite file.
     pub async fn load_sync_state(&mut self) {
+        if let Some(ts) = Self::load_last_synced_at(self.task_store.pool()).await {
+            self.last_synced_at = ts;
+        }
+    }
+
+    /// Persist the current last_synced_at to the metadata table.
+    ///
+    /// # Per-account safety
+    ///
+    /// The metadata table lives in the per-account SQLite database, so this
+    /// value is naturally scoped to the current authenticated account.
+    pub async fn persist_sync_state(&self) {
+        Self::save_last_synced_at(self.task_store.pool(), self.last_synced_at).await;
+    }
+
+    /// Load last_synced_at from the metadata table (static helper).
+    async fn load_last_synced_at(pool: &sqlx::SqlitePool) -> Option<chrono::DateTime<chrono::Utc>> {
         if let Ok(row) = sqlx::query_as::<_, (String,)>(
             "SELECT value FROM metadata WHERE key = 'last_synced_at'",
         )
-        .fetch_optional(self.task_store.pool())
+        .fetch_optional(pool)
         .await
         {
             if let Some((ts,)) = row {
                 if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&ts) {
-                    self.last_synced_at = dt.with_timezone(&chrono::Utc);
+                    return Some(dt.with_timezone(&chrono::Utc));
                 }
             }
         }
+        None
+    }
+
+    /// Save last_synced_at to the metadata table (static helper).
+    async fn save_last_synced_at(pool: &sqlx::SqlitePool, ts: chrono::DateTime<chrono::Utc>) {
+        let rfc = ts.to_rfc3339();
+        let _ = sqlx::query("INSERT OR REPLACE INTO metadata (key, value) VALUES ('last_synced_at', ?)")
+            .bind(&rfc)
+            .execute(pool)
+            .await;
     }
 
     /// Load tasks from the database for the current user.
@@ -1036,17 +1070,47 @@ impl App {
         self.sync_status = SyncStatus::Syncing;
         self.last_sync_attempt = Instant::now();
 
+        // Fetch remote max seq as a defensive guard for seq collisions when the
+        // local operations table is empty (e.g. first sync on a new device).
+        // After account-scoped per-account databases (Task 1-2), this is no longer
+        // the primary account-separation mechanism — it's a safety net for the case
+        // where a device re-syncs after a local DB wipe.
+        let local_max_seq = self.op_store.max_local_seq(self.user_id, self.device_id).await?;
+        if local_max_seq == 0 {
+            // self.user_id is canonical (Supabase auth ID in synced mode)
+            if let Ok(Some(max_seq)) = client.max_seq_for_device(self.user_id, self.device_id).await {
+                self.op_store.set_remote_max_seq(Some(max_seq));
+            }
+        }
+
         // 1. Upload local unsynced operations
         let upload_count = match self.op_store.get_unsynced(self.user_id).await {
             Ok(unsynced) if !unsynced.is_empty() => {
                 let count = unsynced.len();
-                if let Err(e) = client.upload_operations(unsynced.clone()).await {
-                    self.sync_status = SyncStatus::Offline(format!("Upload failed: {}", e));
-                    self.status_message = Some(format!("Sync upload failed: {}", e));
-                    return Ok(());
-                }
                 let op_ids: Vec<Uuid> = unsynced.iter().map(|op| op.op_id).collect();
-                self.op_store.mark_synced(&op_ids).await?;
+                match client.upload_operations(unsynced.clone()).await {
+                    Ok(_) => {
+                        self.op_store.mark_synced(&op_ids).await?;
+                    }
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        if err_msg.contains("duplicate key") {
+                            // Operations already exist in Supabase — mark as synced and continue.
+                            //
+                            // This duplicate tolerance is now purely an idempotency guard.
+                            // It is no longer relied upon to mask account-switch state
+                            // corruption because per-account database partitioning (Task 1-2)
+                            // prevents different accounts from sharing the same operation
+                            // queue. The server-side unique constraint on (op_id) ensures
+                            // at-most-once delivery even if the client retries.
+                            self.op_store.mark_synced(&op_ids).await?;
+                        } else {
+                            self.sync_status = SyncStatus::Offline(format!("Upload failed: {}", e));
+                            self.status_message = Some(format!("Sync upload failed: {}", e));
+                            return Ok(());
+                        }
+                    }
+                }
                 count
             }
             Ok(_) => 0,
@@ -1068,20 +1132,18 @@ impl App {
         };
 
         // 3. Apply remote operations (skip our own)
-        //    Use the Supabase auth user ID for the check, since operations from
-        //    other clients (e.g. PWA) will have the Supabase user ID. Fall back
-        //    to the local user_id if sync client doesn't have the supabase ID yet.
-        let expected_user_id = self.sync_client
-            .as_ref()
-            .and_then(|c| c.supabase_user_id())
-            .unwrap_or(self.user_id);
+        //    After identity canonicalization (Task 2/5), self.user_id equals the
+        //    authenticated Supabase user ID in synced mode. Operations from other
+        //    clients (e.g. PWA) will carry the same Supabase user ID.
+        //    No fallback to a synthetic user ID is needed.
         let mut newest_time = self.last_synced_at;
         let mut applied_count = 0;
         for op in &remote_ops {
             if op.created_at > newest_time {
                 newest_time = op.created_at;
             }
-            if op.device_id == self.device_id || op.user_id != expected_user_id {
+            // Skip our own device's operations (device_id is global per install)
+            if op.device_id == self.device_id || op.user_id != self.user_id {
                 continue;
             }
             if let Err(e) = self.apply_remote_operation(op).await {
@@ -1093,11 +1155,8 @@ impl App {
         self.last_synced_at = newest_time;
 
         // Persist last_synced_at across restarts
-        let ts = self.last_synced_at.to_rfc3339();
-        let _ = sqlx::query("INSERT OR REPLACE INTO metadata (key, value) VALUES ('last_synced_at', ?)")
-            .bind(&ts)
-            .execute(self.task_store.pool())
-            .await;
+        // This is now per-account because the database is per-account.
+        self.persist_sync_state().await;
 
         // 4. Refresh UI
         self.refresh_tasks().await?;

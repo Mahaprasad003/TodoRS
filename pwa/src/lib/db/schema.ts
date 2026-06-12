@@ -1,7 +1,7 @@
 // IndexedDB schema for TodoRS PWA — mirrors the TUI's SQLite schema
 
 export const DB_NAME = 'todors-pwa';
-export const DB_VERSION = 1;
+export const DB_VERSION = 2;
 
 // ── Record Interfaces ──
 
@@ -71,6 +71,7 @@ export interface OperationRecord {
 }
 
 export interface SyncStateRecord {
+  account_key: string;
   device_id: string;
   user_id: string;
   last_synced_at: string;

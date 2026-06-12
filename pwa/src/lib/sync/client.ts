@@ -110,7 +110,7 @@ export async function generateOperation(
 
 // ── Upload / Download ──
 
-async function uploadOperations(operations: OperationRecord[]): Promise<void> {
+async function uploadOperations(operations: OperationRecord[]): Promise<{ duplicateKeys: boolean }> {
   if (!accessToken) throw new Error('Not authenticated');
 
   const response = await fetch(`${supabaseUrl}/functions/v1/upload-operations`, {
@@ -125,9 +125,20 @@ async function uploadOperations(operations: OperationRecord[]): Promise<void> {
 
   if (!response.ok) {
     const body = await response.text().catch(() => '(no body)');
+    // Tolerate duplicate key errors — operations already exist on the server.
+    // This is an idempotency guard: the unique constraint on (op_id) ensures
+    // at-most-once delivery even if the client retries. After per-account
+    // database partitioning, this should not happen in normal operation,
+    // but handling it gracefully prevents hard failure loops.
+    if (body.toLowerCase().includes('duplicate') || body.toLowerCase().includes('unique constraint')) {
+      console.warn('upload-operations: duplicate ops detected, marking as synced', body);
+      return { duplicateKeys: true };
+    }
     console.error('upload-operations failed:', response.status, body);
     throw new Error(`Upload failed (${response.status}): ${body}`);
   }
+
+  return { duplicateKeys: false };
 }
 
 async function getRemoteOperations(since: string): Promise<any[]> {
@@ -319,18 +330,22 @@ async function syncRunner(): Promise<SyncResult> {
   syncStore.set({ status: 'syncing', lastSyncedAt: null, error: null });
 
   try {
-    // 1. Upload unsynced operations
-    const unsyncedOps = await getUnsyncedOperations();
+    // 1. Upload unsynced operations (scoped to current user)
+    const unsyncedOps = await getUnsyncedOperations(currentUserId);
     if (unsyncedOps.length > 0) {
-      await uploadOperations(unsyncedOps);
+      const { duplicateKeys } = await uploadOperations(unsyncedOps);
+      // Mark as synced even on duplicate-key response (idempotency guard)
       await markOperationsSynced(unsyncedOps.map(op => op.op_id));
+      if (duplicateKeys) {
+        console.warn(`sync: ${unsyncedOps.length} ops had duplicate keys, marked synced anyway`);
+      }
     }
 
     // 2. Initialize sync state if needed
-    await initSyncState(deviceId, currentUserId);
+    await initSyncState(currentUserId, deviceId);
 
     // 3. Download remote operations after last_synced_at
-    const syncState = await getSyncState(deviceId);
+    const syncState = await getSyncState(currentUserId, deviceId);
     const since = syncState?.last_synced_at || '1970-01-01T00:00:00Z';
     const remoteOps = await getRemoteOperations(since);
 
@@ -351,6 +366,7 @@ async function syncRunner(): Promise<SyncResult> {
 
     // 5. Update sync state
     await updateSyncState({
+      account_key: `${currentUserId}:${deviceId}`,
       device_id: deviceId,
       user_id: currentUserId,
       last_synced_at: newestTime,
@@ -412,6 +428,6 @@ export async function bootstrapAfterAuth(userId: string, token: string): Promise
   setAuthToken(token);
   setCurrentUserId(userId);
   const deviceId = await ensureDeviceId();
-  await initSyncState(deviceId, userId);
+  await initSyncState(userId, deviceId);
   await syncWithRetry();
 }

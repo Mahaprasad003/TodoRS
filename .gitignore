@@ -4,3 +4,7 @@
 *.db-wal
 *.db-shm
 .env
+
+# Legacy identity files (removed in sync hardening)
+.todomrs_user_id
+.todomrs_device_id

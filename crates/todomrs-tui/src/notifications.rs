@@ -8,6 +8,14 @@ use todomrs_core::domain::Task;
 /// Check all three notification moments after a sync completes.
 ///
 /// Uses the metadata table in SQLite for state tracking, same keys as the PWA.
+///
+/// # Per-account safety
+///
+/// The metadata keys `last_daily_notify` and `notified_tasks` are read from
+/// and written to the per-account database. Since each authenticated account
+/// opens a different SQLite file, notification state cannot bleed across
+/// accounts. This was previously a cross-account concern when all accounts
+/// shared one global database.
 pub async fn check_notifications(pool: &SqlitePool, tasks: &[Task]) -> Result<()> {
     let pending: Vec<&Task> = tasks
         .iter()

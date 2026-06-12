@@ -6,10 +6,12 @@ export async function createOperation(op: OperationRecord): Promise<void> {
   await db.put('operations', op);
 }
 
-export async function getUnsyncedOperations(): Promise<OperationRecord[]> {
+export async function getUnsyncedOperations(userId: string): Promise<OperationRecord[]> {
   const db = await getDatabase();
-  const all = await db.getAll('operations');
-  return all.filter(op => !op.synced_at).sort((a, b) => a.seq - b.seq);
+  const userOps = await db.getAllFromIndex('operations', 'user_id', userId);
+  return userOps
+    .filter(op => !op.synced_at)
+    .sort((a, b) => a.seq - b.seq);
 }
 
 export async function getAllOperations(): Promise<OperationRecord[]> {

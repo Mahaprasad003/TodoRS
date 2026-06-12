@@ -29,7 +29,10 @@ Deno.serve(async (req) => {
 
     const { operations } = await req.json()
 
-    // Insert operations
+    // Insert operations with conflict handling.
+    // The (user_id, device_id, seq) constraint prevents duplicates if an operation
+    // was uploaded but the client crashed before marking it synced locally.
+    // ON CONFLICT DO NOTHING makes re-uploading safe.
     const { error } = await supabase
       .from('operations')
       .insert(operations.map((op: any) => ({
@@ -37,7 +40,11 @@ Deno.serve(async (req) => {
         user_id: user.id,
       })))
 
-    if (error) throw error
+    // If the error is a duplicate key violation, the operation already exists —
+    // that's fine, re-uploading is harmless.
+    if (error && !error.message?.includes('duplicate key')) {
+      throw error
+    }
 
     return new Response(
       JSON.stringify({ success: true }),

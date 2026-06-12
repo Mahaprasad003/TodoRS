@@ -79,6 +79,42 @@ impl SyncClient {
         self.supabase_user_id
     }
 
+    /// Query PostgREST for the maximum seq for this device.
+    /// Returns `None` if no operations exist for this device.
+    pub async fn max_seq_for_device(&self, user_id: Uuid, device_id: Uuid) -> Result<Option<i64>> {
+        let token = self
+            .access_token
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not authenticated"))?;
+
+        let url = format!(
+            "{}/rest/v1/operations?user_id=eq.{}&device_id=eq.{}&select=seq&order=seq.desc&limit=1",
+            self.base_url, user_id, device_id
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .header("apikey", &self.api_key)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "PostgREST query failed {}: {}",
+                response.status(),
+                response.text().await.unwrap_or_default()
+            ));
+        }
+
+        let body = response.text().await?;
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap_or_default();
+        Ok(rows
+            .first()
+            .and_then(|r| r.get("seq").and_then(|v| v.as_i64())))
+    }
+
     /// Upload a batch of operations to the backend.
     ///
     /// Requires a valid access token (call `login` first).

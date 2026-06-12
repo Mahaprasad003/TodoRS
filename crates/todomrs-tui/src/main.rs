@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod notifications;
+mod storage;
 mod ui;
 
 use anyhow::Result;
@@ -14,7 +15,6 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::{self, Write};
 use todomrs_store::{Database, OperationStore, ProjectStore, RecurrenceRuleStore, TaskStore};
-use uuid::Uuid;
 
 /// Prompt the user for a line of input, showing a label.
 fn prompt(label: &str) -> String {
@@ -60,11 +60,9 @@ async fn cmd_login() -> Result<()> {
                 new_config.email = email;
                 new_config.password = password;
                 new_config.save()?;
-                // Clear local database so the new account starts fresh
-                let _ = std::fs::remove_file("./todomrs.db");
-                let _ = std::fs::remove_file("./todomrs.db-wal");
-                let _ = std::fs::remove_file("./todomrs.db-shm");
                 println!("Login successful. Credentials saved to config.");
+                println!("To switch accounts, run: todomrs login again to overwrite credentials.");
+        println!("Your local task data is now automatically scoped by account.");
                 return Ok(());
             }
             Ok(_) => {
@@ -76,19 +74,6 @@ async fn cmd_login() -> Result<()> {
         }
     }
 }
-
-/// Load a persistent UUID from a file, or create one if it doesn't exist.
-fn load_or_create_id(path: &str) -> Uuid {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| Uuid::parse_str(s.trim()).ok())
-        .unwrap_or_else(|| {
-            let id = Uuid::new_v4();
-            let _ = std::fs::write(path, id.to_string());
-            id
-        })
-}
-
 /// Initialize the sync client from config (called before raw mode so errors are visible).
 async fn init_sync_client(config: &Config) -> Option<todomrs_sync::SyncClient> {
     if !config.is_configured() {
@@ -161,7 +146,54 @@ async fn run_async(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     sync_client: Option<todomrs_sync::SyncClient>,
 ) -> Result<()> {
-    let db = Database::new("sqlite://./todomrs.db?mode=rwc").await?;
+    // ── Compute effective account identity ────────────────────────────
+    //
+    // In synced mode, the authenticated Supabase user ID is the canonical
+    // local user_id. In offline/no-auth mode, we use a stable local UUID.
+    //
+    // The account_key determines which per-account database file is used.
+    //
+    // Guard: if the sync client exists but supabase_user_id() is None,
+    // we disable sync to prevent identity mismatch between local user_id
+    // and the JWT's auth user ID.
+    let sync_client = sync_client.and_then(|client| {
+        if client.supabase_user_id().is_some() {
+            Some(client)
+        } else {
+            eprintln!("Warning: Sync login succeeded but no user ID was returned.");
+            eprintln!("  Falling back to offline mode. Sync is disabled.");
+            None
+        }
+    });
+
+    let (effective_user_id, account_key, effective_email) = if let Some(ref client) = sync_client {
+        let supabase_id = client.supabase_user_id()
+            .expect("just checked is_some above");
+        (supabase_id, supabase_id.to_string(), String::new())
+    } else {
+        let uid = storage::load_or_create_uuid(&storage::offline_user_id_path());
+        (uid, "offline-local".to_string(), "local@todomrs".to_string())
+    };
+
+    // ── Emit warning about legacy shared state ────────────────────────
+    // Task 3: Quarantine legacy shared local state — detect and warn
+    let legacy_db = storage::legacy_db_path();
+    let legacy_uid = storage::legacy_user_id_path();
+    let legacy_did = storage::legacy_device_id_path();
+    let has_legacy = legacy_db.exists() || legacy_uid.exists() || legacy_did.exists();
+    if has_legacy {
+        eprintln!("Warning: Legacy shared local state detected (./todomrs.db, ./.todomrs_*).");
+        eprintln!("  This build uses per-account storage at: {}",
+            storage::database_path_for_user(&account_key).display());
+        eprintln!("  Legacy files are left untouched and will not be used.");
+    }
+
+    // ── Open per-account database ─────────────────────────────────────
+    let db_path = storage::database_path_for_user(&account_key);
+    storage::ensure_parent_dir(&db_path)
+        .expect("Failed to create database parent directory");
+    let db_url = storage::sqlite_url_for_path(&db_path);
+    let db = Database::new(&db_url).await?;
     sqlx::migrate!("../../migrations").run(db.pool()).await?;
 
     let task_store = TaskStore::new(db.pool().clone());
@@ -169,19 +201,24 @@ async fn run_async(
     let project_store = ProjectStore::new(db.pool().clone());
     let recurrence_store = RecurrenceRuleStore::new(db.pool().clone());
 
-    // Load or create persistent device identity
-    let user_id = load_or_create_id(".todomrs_user_id");
-    let device_id = load_or_create_id(".todomrs_device_id");
+    // ── Global device identity (per installation, not per account) ────
+    let device_id = storage::load_or_create_uuid(&storage::device_id_path());
 
-    // Ensure local user exists (bind Uuid directly — stored as BLOB, matching sqlx's Uuid type)
+    // ── Ensure local users row matches the effective user ─────────────
+    // In synced mode, the canonical local user_id equals the Supabase auth user ID.
+    // In offline mode, it's a stable local UUID stored in offline_user_id_path().
     sqlx::query("INSERT OR IGNORE INTO users (id, email) VALUES (?, ?)")
-        .bind(user_id)
-        .bind("local@todomrs")
+        .bind(effective_user_id)
+        .bind(effective_email)
         .execute(db.pool())
         .await?;
 
+    // In synced mode, the Supabase auth is the source of truth for identity.
+    // The users row already exists with the correct user_id from INSERT above.
+    // The email can be left as empty; the canonical email is in Supabase auth.
+
     let mut app = App::new(
-        user_id,
+        effective_user_id,
         device_id,
         task_store,
         op_store,

@@ -13,11 +13,35 @@ use uuid::Uuid;
 
 pub struct OperationStore {
     pool: SqlitePool,
+    /// Remote max seq for this device. When set and the local max is 0
+    /// (empty table), used to avoid seq collisions after account switch.
+    remote_max_seq: Option<i64>,
 }
 
 impl OperationStore {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            remote_max_seq: None,
+        }
+    }
+
+    pub fn set_remote_max_seq(&mut self, max_seq: Option<i64>) {
+        self.remote_max_seq = max_seq;
+    }
+
+    /// Get the local max seq for this device (without remote fallback).
+    pub async fn max_local_seq(&self, user_id: Uuid, device_id: Uuid) -> Result<i64> {
+        let result: Option<(i64,)> = sqlx::query_as(
+            "SELECT MAX(seq) FROM operations WHERE user_id = ? AND device_id = ?",
+        )
+        .bind(user_id.to_string())
+        .bind(device_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .context("get local max seq")?;
+
+        Ok(result.map(|(max_seq,)| max_seq).unwrap_or(0))
     }
 
     pub async fn append(&self, op: &Operation) -> Result<()> {
@@ -85,6 +109,10 @@ impl OperationStore {
         &self.pool
     }
 
+    /// Get the next sequence number for an operation.
+    ///
+    /// If the local table is empty and `remote_max_seq` is set, uses
+    /// `remote_max_seq + 1` to avoid seq collisions after account switch.
     pub async fn get_next_seq(&self, user_id: Uuid, device_id: Uuid) -> Result<i64> {
         let result: Option<(i64,)> = sqlx::query_as(
             "SELECT MAX(seq) FROM operations WHERE user_id = ? AND device_id = ?",
@@ -95,7 +123,9 @@ impl OperationStore {
         .await
         .context("get next seq")?;
 
-        Ok(result.map(|(max_seq,)| max_seq).unwrap_or(0) + 1)
+        let local_max = result.map(|(max_seq,)| max_seq).unwrap_or(0);
+        let effective_max = self.remote_max_seq.unwrap_or(0).max(local_max);
+        Ok(effective_max + 1)
     }
 
     pub async fn create_snapshot(

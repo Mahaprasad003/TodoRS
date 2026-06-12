@@ -11,9 +11,66 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
-use std::io;
+use std::io::{self, Write};
 use todomrs_store::{Database, OperationStore, ProjectStore, RecurrenceRuleStore, TaskStore};
 use uuid::Uuid;
+
+/// Prompt the user for a line of input, showing a label.
+fn prompt(label: &str) -> String {
+    print!("{}: ", label);
+    let _ = io::stdout().flush();
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).unwrap_or_default();
+    input.trim().to_string()
+}
+
+/// Handle the `todomrs login` CLI command.
+async fn cmd_login() -> Result<()> {
+    let config = Config::load()?;
+
+    if config.supabase_url.contains("YOUR_PROJECT") || config.supabase_api_key.contains("YOUR_ANON_KEY") {
+        eprintln!("Supabase is not configured.");
+        eprintln!("First edit: {}", Config::config_path().display());
+        return Ok(());
+    }
+
+    let mut client = todomrs_sync::SyncClient::new(
+        config.supabase_url.clone(),
+        config.supabase_api_key.clone(),
+    );
+
+    println!("Enter your TodoRS account credentials.");
+    loop {
+        let email = prompt("Email");
+        if email.is_empty() {
+            eprintln!("Email cannot be empty.");
+            continue;
+        }
+
+        let password = prompt("Password");
+        if password.is_empty() {
+            eprintln!("Password cannot be empty.");
+            continue;
+        }
+
+        match client.login(&email, &password).await {
+            Ok(token) if !token.is_empty() => {
+                let mut new_config = config.clone();
+                new_config.email = email;
+                new_config.password = password;
+                new_config.save()?;
+                println!("Login successful. Credentials saved to config.");
+                return Ok(());
+            }
+            Ok(_) => {
+                eprintln!("Login returned an empty token. Please try again.");
+            }
+            Err(e) => {
+                eprintln!("Login failed: {}. Please try again.", e);
+            }
+        }
+    }
+}
 
 /// Load a persistent UUID from a file, or create one if it doesn't exist.
 fn load_or_create_id(path: &str) -> Uuid {
@@ -60,6 +117,14 @@ async fn init_sync_client(config: &Config) -> Option<todomrs_sync::SyncClient> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+
+    // `todomrs login` — CLI login flow, no TUI needed
+    if args.get(1).map(|s| s.as_str()) == Some("login") {
+        return cmd_login().await;
+    }
+
+    // Normal TUI startup
     // Install panic hook to restore terminal on crash
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {

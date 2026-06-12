@@ -239,16 +239,29 @@ async function applyRemoteOperation(op: any): Promise<void> {
           case 'update': {
             const existing = await getTask(op.entity_id);
             if (existing) {
-              // When status changes to 'pending', explicitly clear completed_at
-              // because the TUI omits completed_at: None from the JSON payload
-              // (serde skips None fields), so the stale value would persist.
-              const updates: any = { id: op.entity_id, ...p };
-              if (p.status === 'pending' && existing.completed_at) {
+              // Strip null values from the payload before merging — serde
+              // serializes Option::None as null (no skip_serializing_if), so
+              // TUI's TaskUpdate sends fields like title: null, description: null
+              // for every unchanged field. Spreading these would overwrite the
+              // existing record's values with null, losing data.
+              const cleanPayload: Record<string, any> = {};
+              for (const [key, val] of Object.entries(p)) {
+                if (val !== null) cleanPayload[key] = val;
+              }
+              const updates: any = { id: op.entity_id, ...cleanPayload };
+              // When status changes to 'pending' without an explicit completed_at
+              // in the payload, clear the stale completed_at from the existing record.
+              if ((p.status === 'pending' || updates.status === 'pending') && existing.completed_at) {
                 updates.completed_at = null;
               }
               await updateTaskInDb(updates);
             } else {
               // Create if doesn't exist (race condition - remote created first)
+              // Filter out null values from p — serde sends null for every None field.
+              const cleanP: Record<string, any> = {};
+              for (const [key, val] of Object.entries(p)) {
+                if (val !== null) cleanP[key] = val;
+              }
               await createTask({
                 id: op.entity_id,
                 user_id: op.user_id,
@@ -258,7 +271,7 @@ async function applyRemoteOperation(op: any): Promise<void> {
                 priority: 'none',
                 created_at: op.created_at,
                 updated_at: op.created_at,
-                ...p,
+                ...cleanP,
               });
             }
             break;
@@ -293,9 +306,14 @@ async function applyRemoteOperation(op: any): Promise<void> {
             break;
           }
           case 'update': {
+            // Filter out null values — serde sends null for every None field
+            const cleanP: Record<string, any> = {};
+            for (const [key, val] of Object.entries(p)) {
+              if (val !== null) cleanP[key] = val;
+            }
             await updateProjectInDb({
               id: op.entity_id,
-              ...p,
+              ...cleanP,
             });
             break;
           }

@@ -61,15 +61,25 @@ pub enum OperationPayload {
         recurrence_rule_id: Option<Uuid>,
     },
     TaskUpdate {
+        #[serde(skip_serializing_if = "Option::is_none")]
         title: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         description: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         status: Option<TaskStatus>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         project_id: Option<Uuid>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         tag_ids: Option<Vec<Uuid>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         priority: Option<Priority>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         due_at: Option<DateTime<Utc>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         scheduled_at: Option<DateTime<Utc>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         recurrence_rule_id: Option<Uuid>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         completed_at: Option<DateTime<Utc>>,
     },
     ProjectCreate {
@@ -78,9 +88,13 @@ pub enum OperationPayload {
         sort_order: i32,
     },
     ProjectUpdate {
+        #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         color: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         sort_order: Option<i32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         archived_at: Option<DateTime<Utc>>,
     },
     TagCreate {

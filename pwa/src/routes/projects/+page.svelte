@@ -2,6 +2,7 @@
   import { activeProjects, addProject } from '$lib/stores/projects';
   import { tasksStore } from '$lib/stores/tasks';
   import { goto } from '$app/navigation';
+  import { projectFabTrigger } from '$lib/stores/fab';
 
   let showNewForm = false;
   let newName = '';
@@ -12,6 +13,11 @@
     '#5e6ad2', '#27a644', '#f5a623', '#ee0000',
     '#50e3c2', '#7928ca', '#ff0080', '#f7f8f8',
   ];
+
+  // Open project form when FAB is pressed on this page
+  $: if ($projectFabTrigger) {
+    showNewForm = true;
+  }
 
   $: taskCounts = $tasksStore.reduce((acc, t) => {
     if (t.project_id && t.status === 'pending' && !t.deleted_at) {

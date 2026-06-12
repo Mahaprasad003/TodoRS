@@ -16,6 +16,7 @@
   import { confirm, confirmStore, confirmResponse } from '$lib/stores/confirm';
   import { openSearch } from '$lib/stores/search';
   import { editingTask, closeEdit } from '$lib/stores/edit';
+  import { triggerProjectFab } from '$lib/stores/fab';
   import { requestNotificationPermission } from '$lib/notifications';
   import '../app.css';
 
@@ -255,7 +256,14 @@
   </div>
 
   <!-- Floating Action Button (mobile only) -->
-  <FloatingAddButton on:open={() => { closeEdit(); showAddModal = true; }} />
+  <FloatingAddButton on:open={() => {
+    if (currentPath === '/projects') {
+      triggerProjectFab();
+    } else {
+      closeEdit();
+      showAddModal = true;
+    }
+  }} />
 
   <!-- Add Task Modal (create or edit) -->
   <AddTaskModal

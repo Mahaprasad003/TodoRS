@@ -1,1 +1,23 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192"><rect width="192" height="192" rx="24" fill="#5e6ad2"/><text x="96" y="128" text-anchor="middle" fill="white" font-family="Inter,system-ui,sans-serif" font-size="96" font-weight="600">T</text></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="192" y2="192">
+      <stop offset="0%" stop-color="#6b77e0"/>
+      <stop offset="100%" stop-color="#4a56c4"/>
+    </linearGradient>
+  </defs>
+  <!-- Background -->
+  <rect width="192" height="192" rx="32" fill="url(#bg)"/>
+  <!-- Clipboard outline -->
+  <rect x="56" y="36" width="80" height="96" rx="10" fill="none" stroke="white" stroke-width="7" stroke-linejoin="round"/>
+  <!-- Clipboard top tab -->
+  <rect x="72" y="28" width="48" height="12" rx="6" fill="white"/>
+  <!-- Checkbox -->
+  <rect x="72" y="64" width="20" height="20" rx="4" fill="none" stroke="white" stroke-width="4"/>
+  <!-- Checkmark -->
+  <path d="M75 74L83 82L93 68" stroke="white" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- Lines -->
+  <rect x="100" y="70" width="32" height="3" rx="1.5" fill="white" opacity="0.7"/>
+  <rect x="72" y="96" width="20" height="20" rx="4" fill="none" stroke="white" stroke-width="4"/>
+  <path d="M75 106L83 114L93 100" stroke="white" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <rect x="100" y="102" width="28" height="3" rx="1.5" fill="white" opacity="0.4"/>
+</svg>
